@@ -166,7 +166,7 @@ class EEGDINOTrainer:
         n_heads=8,
         mlp_dim=512,
         batch_size=256,
-        learning_rate=2e-4,
+        learning_rate=1e-4,
         weight_decay=0.04,
         teacher_momentum=0.996,
         device='cuda'
@@ -337,6 +337,7 @@ class EEGDINOTrainer:
 
             self.optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self._raw_student().parameters(), max_norm=3.0)
             self.optimizer.step()
 
             # EMA teacher update (uses _raw_student, DataParallel safe)
@@ -434,7 +435,7 @@ def main():
         'n_heads':          8,
         'mlp_dim':          512,
         'batch_size':       256,
-        'learning_rate':    2e-4,
+        'learning_rate':    1e-4,
         'weight_decay':     0.04,
         'teacher_momentum': 0.996,
         'device':           'cuda' if torch.cuda.is_available() else 'cpu'
