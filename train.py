@@ -2,6 +2,8 @@
 Complete EEG-DINO Training Loop
 Multi-GPU (2x) ready via DataParallel
 
+Launch: python train.py
+GPU selection is handled in code (device_ids=[0,2]). GPU 1 (GT 1030) is never used.
 """
 import torch
 import torch.nn as nn
@@ -185,17 +187,20 @@ class EEGDINOTrainer:
         print("Initializing teacher model...")
         self.teacher = TeacherModel(self.student).to(device)
 
-        # Explicitly use only the two L40S GPUs (device indices 0 and 2).
-        # Hardcoding device_ids prevents DataParallel from ever touching
-        # GPU 1 (GT 1030, 2GB) which would immediately OOM.
-        L40S_IDS = [0, 2]
-        available = [i for i in L40S_IDS if i < torch.cuda.device_count()]
-        if len(available) > 1:
-            print(f"Using GPUs {available} via DataParallel")
-            self.student = nn.DataParallel(self.student, device_ids=available)
-            self.device = f'cuda:{available[0]}'
+        # GPU selection relies on CUDA_VISIBLE_DEVICES=0,2 set at launch.
+        # With that env var, PyTorch sees only 2 devices (0 and 1) — both L40S.
+        # The GT 1030 (nvidia-smi GPU 1 = raw CUDA device 2) is hidden entirely.
+        # DO NOT launch without CUDA_VISIBLE_DEVICES=0,2.
+        n_visible = torch.cuda.device_count()
+        if n_visible >= 2:
+            print(f"Using {n_visible} GPUs via DataParallel (device_ids=[0,1])")
+            self.student = nn.DataParallel(self.student, device_ids=[0, 1])
+            self.device = 'cuda:0'
+        elif n_visible == 1:
+            print("Single GPU mode on cuda:0")
+            self.device = 'cuda:0'
         else:
-            print(f"Single GPU mode on cuda:{available[0]}")
+            raise RuntimeError("No CUDA GPUs visible. Did you set CUDA_VISIBLE_DEVICES=0,2?")
 
         # ── Channel-aware sampling ───────────────────────────────────────────
         self.sampler = ChannelAwareSampling(n_channels, sampling_rate)
