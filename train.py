@@ -2,7 +2,6 @@
 Complete EEG-DINO Training Loop
 Multi-GPU (2x) ready via DataParallel
 
-Launch: CUDA_VISIBLE_DEVICES=0,2 python train.py   (GPU 1 is a GT 1030, unusable)
 """
 import torch
 import torch.nn as nn
@@ -164,7 +163,7 @@ class EEGDINOTrainer:
         n_layers=12,
         n_heads=8,
         mlp_dim=512,
-        batch_size=256,
+        batch_size=32,
         learning_rate=1e-4,
         weight_decay=0.04,
         teacher_momentum=0.996,
@@ -186,11 +185,18 @@ class EEGDINOTrainer:
         print("Initializing teacher model...")
         self.teacher = TeacherModel(self.student).to(device)
 
-        # Now safe to wrap student for multi-GPU training
-        n_gpus = torch.cuda.device_count()
-        if n_gpus > 1:
-            print(f"Using {n_gpus} GPUs via DataParallel")
-            self.student = nn.DataParallel(self.student, device_ids=[0, 1])
+        # Explicitly use only the two L40S GPUs (device indices 0 and 2).
+        # Hardcoding device_ids prevents DataParallel from ever touching
+        # GPU 1 (GT 1030, 2GB) which would immediately OOM.
+        L40S_IDS = [0, 2]
+        available = [i for i in L40S_IDS if i < torch.cuda.device_count()]
+        if len(available) > 1:
+            print(f"Using GPUs {available} via DataParallel")
+            self.student = nn.DataParallel(self.student, device_ids=available)
+            self.device = f'cuda:{available[0]}'
+        else:
+            print(f"Single GPU mode on cuda:{available[0]}")
+
         # ── Channel-aware sampling ───────────────────────────────────────────
         self.sampler = ChannelAwareSampling(n_channels, sampling_rate)
 
@@ -422,7 +428,7 @@ def main():
         'n_layers':         12,
         'n_heads':          8,
         'mlp_dim':          512,
-        'batch_size':       256,
+        'batch_size':       32,
         'learning_rate':    1e-4,
         'weight_decay':     0.04,
         'teacher_momentum': 0.996,
