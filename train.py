@@ -164,7 +164,7 @@ class EEGDINOTrainer:
         n_layers=12,
         n_heads=8,
         mlp_dim=512,
-        batch_size=32,
+        batch_size=256,
         learning_rate=1e-4,
         weight_decay=0.04,
         teacher_momentum=0.996,
@@ -190,8 +190,7 @@ class EEGDINOTrainer:
         n_gpus = torch.cuda.device_count()
         if n_gpus > 1:
             print(f"Using {n_gpus} GPUs via DataParallel")
-            self.student = nn.DataParallel(self.student)
-
+            self.student = nn.DataParallel(self.student, device_ids=[0, 1])
         # ── Channel-aware sampling ───────────────────────────────────────────
         self.sampler = ChannelAwareSampling(n_channels, sampling_rate)
 
@@ -423,7 +422,7 @@ def main():
         'n_layers':         12,
         'n_heads':          8,
         'mlp_dim':          512,
-        'batch_size':       32,
+        'batch_size':       256,
         'learning_rate':    1e-4,
         'weight_decay':     0.04,
         'teacher_momentum': 0.996,
