@@ -40,6 +40,7 @@ class EEGDataset(Dataset):
 
     def load_real_data(self, data_path):
         from glob import glob
+        from tqdm import tqdm
         import torch.nn.functional as F
 
         data = []
@@ -53,23 +54,24 @@ class EEGDataset(Dataset):
         # then zero-pad to [n_channels, samples_per_epoch] = [19, 6000].
         if pt_files:
             print(f"Found {len(pt_files)} .pt files (Sleep-EDF) in {data_path}")
-            src_rate   = 100
-            tgt_rate   = self.sampling_rate                    # 200
-            tgt_samples = self.samples_per_epoch               # 6000
+            src_rate    = 100
+            tgt_rate    = self.sampling_rate    # 200
+            tgt_samples = self.samples_per_epoch  # 6000
 
-            for file_path in pt_files:
+            for file_path in tqdm(pt_files, desc="Loading Sleep-EDF"):
                 try:
                     # torch.load is read-only — the file is never modified
-                    tensor = torch.load(file_path, map_location='cpu')  # [2, 3000]
+                    tensor = torch.load(file_path, map_location='cpu',
+                                        weights_only=True)   # [2, 3000]
 
                     # Resample: interpolate expects [batch, channels, time]
                     if src_rate != tgt_rate:
                         tensor = F.interpolate(
-                            tensor.unsqueeze(0).float(),       # [1, 2, 3000]
+                            tensor.unsqueeze(0).float(),     # [1, 2, 3000]
                             size=tgt_samples,
                             mode='linear',
                             align_corners=False
-                        ).squeeze(0)                           # [2, 6000]
+                        ).squeeze(0)                         # [2, 6000]
 
                     # Zero-pad channels: [2, 6000] → [19, 6000]
                     n_ch = tensor.shape[0]
@@ -84,28 +86,34 @@ class EEGDataset(Dataset):
                     continue
 
         # ── BCI Competition: raw .gdf files, multiple channels @ 250 Hz ─────
-        # BCI-IV 2a: 22 EEG channels + 3 EOG. BCI-IV 2b: 3 EEG channels.
-        # MNE reads them, we resample to self.sampling_rate, take up to
-        # n_channels EEG channels, then split into 30s epochs.
+        # BCI-IV 2a: 22 EEG channels + 3 EOG. BCI-IV 2b: 3 EEG channels
+        # (all named 'EEG' — MNE auto-renames to EEG-0, EEG-1, EEG-2).
+        # We use get_data() directly on the indices rather than picking by
+        # name, which avoids all duplicate-name and legacy-API issues.
         if gdf_files:
             import mne
+            import warnings
             print(f"Found {len(gdf_files)} .gdf files (BCI Competition) in {data_path}")
 
-            for file_path in gdf_files:
+            for file_path in tqdm(gdf_files, desc="Loading BCI GDF"):
                 try:
-                    # Read-only — never calls raw.save() or any write method
-                    raw = mne.io.read_raw_gdf(file_path, preload=True, verbose=False)
+                    # Suppress duplicate-name and legacy-API warnings — both
+                    # are cosmetic and do not affect the data we extract.
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        # Read-only — never calls raw.save() or any write method
+                        raw = mne.io.read_raw_gdf(file_path, preload=True,
+                                                   verbose=False)
 
-                    # Keep only EEG channels (drop EOG, stim, etc.)
-                    raw.pick_types(eeg=True)
+                    # Identify EEG channel indices without touching channel names
+                    eeg_idx = mne.pick_types(raw.info, eeg=True, exclude='bads')
 
+                    # Limit to at most n_channels
+                    eeg_idx = eeg_idx[:self.n_channels]
+
+                    # get_data with indices — no pick_types / pick_channels call
                     raw.resample(self.sampling_rate)
-
-                    # Take up to n_channels channels
-                    available = raw.ch_names[:self.n_channels]
-                    raw.pick_channels(available)
-
-                    epoch_data = raw.get_data()   # [n_ch, n_times]
+                    epoch_data = raw.get_data(picks=eeg_idx)  # [n_ch, n_times]
                     n_ch = epoch_data.shape[0]
 
                     # Zero-pad channels if fewer than expected
