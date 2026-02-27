@@ -1,5 +1,8 @@
 """
-EEG-DINO Training Loop
+Complete EEG-DINO Training Loop
+Multi-GPU (2x) ready via DataParallel
+
+Launch: CUDA_VISIBLE_DEVICES=0,2 python train.py   (GPU 1 is a GT 1030, unusable)
 """
 import torch
 import torch.nn as nn
@@ -36,49 +39,92 @@ class EEGDataset(Dataset):
             self.data = self.load_real_data(data_path)
 
     def load_real_data(self, data_path):
-        import mne
         from glob import glob
+        import torch.nn.functional as F
 
         data = []
 
-        edf_files = glob(os.path.join(data_path, '**/*.edf'), recursive=True)
+        pt_files  = glob(os.path.join(data_path, '**/*.pt'),  recursive=True)
         gdf_files = glob(os.path.join(data_path, '**/*.gdf'), recursive=True)
-        all_files = edf_files + gdf_files
 
-        print(f"Found {len(all_files)} files in {data_path}")
+        # ── Sleep-EDF: pre-epoched .pt tensors, shape [2, 3000] ─────────────
+        # 2 channels (Fpz-Cz, Pz-Oz), 3000 samples @ 100 Hz = 30 seconds.
+        # We resample to self.sampling_rate (200 Hz) → [2, 6000],
+        # then zero-pad to [n_channels, samples_per_epoch] = [19, 6000].
+        if pt_files:
+            print(f"Found {len(pt_files)} .pt files (Sleep-EDF) in {data_path}")
+            src_rate   = 100
+            tgt_rate   = self.sampling_rate                    # 200
+            tgt_samples = self.samples_per_epoch               # 6000
 
-        for file_path in all_files:
-            try:
-                # Read-only load — never writes back to disk
-                if file_path.endswith('.edf'):
-                    raw = mne.io.read_raw_edf(file_path, preload=True, verbose=False)
-                elif file_path.endswith('.gdf'):
-                    raw = mne.io.read_raw_gdf(file_path, preload=True, verbose=False)
-                else:
+            for file_path in pt_files:
+                try:
+                    # torch.load is read-only — the file is never modified
+                    tensor = torch.load(file_path, map_location='cpu')  # [2, 3000]
+
+                    # Resample: interpolate expects [batch, channels, time]
+                    if src_rate != tgt_rate:
+                        tensor = F.interpolate(
+                            tensor.unsqueeze(0).float(),       # [1, 2, 3000]
+                            size=tgt_samples,
+                            mode='linear',
+                            align_corners=False
+                        ).squeeze(0)                           # [2, 6000]
+
+                    # Zero-pad channels: [2, 6000] → [19, 6000]
+                    n_ch = tensor.shape[0]
+                    if n_ch < self.n_channels:
+                        pad = torch.zeros(self.n_channels - n_ch, tensor.shape[1])
+                        tensor = torch.cat([tensor, pad], dim=0)
+
+                    data.append(tensor)
+
+                except Exception as e:
+                    print(f"Skipping {file_path}: {e}")
                     continue
 
-                raw.resample(self.sampling_rate)
+        # ── BCI Competition: raw .gdf files, multiple channels @ 250 Hz ─────
+        # BCI-IV 2a: 22 EEG channels + 3 EOG. BCI-IV 2b: 3 EEG channels.
+        # MNE reads them, we resample to self.sampling_rate, take up to
+        # n_channels EEG channels, then split into 30s epochs.
+        if gdf_files:
+            import mne
+            print(f"Found {len(gdf_files)} .gdf files (BCI Competition) in {data_path}")
 
-                # Pick up to n_channels available channels
-                available = raw.ch_names[:self.n_channels]
-                raw.pick_channels(available)
+            for file_path in gdf_files:
+                try:
+                    # Read-only — never calls raw.save() or any write method
+                    raw = mne.io.read_raw_gdf(file_path, preload=True, verbose=False)
 
-                epoch_data = raw.get_data()  # shape: (n_ch, n_times)
-                n_ch = epoch_data.shape[0]
+                    # Keep only EEG channels (drop EOG, stim, etc.)
+                    raw.pick_types(eeg=True)
 
-                # Pad with zeros if fewer channels than expected
-                if n_ch < self.n_channels:
-                    pad = np.zeros((self.n_channels - n_ch, epoch_data.shape[1]))
-                    epoch_data = np.concatenate([epoch_data, pad], axis=0)
+                    raw.resample(self.sampling_rate)
 
-                # Split into non-overlapping 30s epochs
-                for start in range(0, epoch_data.shape[1] - self.samples_per_epoch, self.samples_per_epoch):
-                    epoch = epoch_data[:, start:start + self.samples_per_epoch]
-                    data.append(torch.FloatTensor(epoch))
+                    # Take up to n_channels channels
+                    available = raw.ch_names[:self.n_channels]
+                    raw.pick_channels(available)
 
-            except Exception as e:
-                print(f"Skipping {file_path}: {e}")
-                continue
+                    epoch_data = raw.get_data()   # [n_ch, n_times]
+                    n_ch = epoch_data.shape[0]
+
+                    # Zero-pad channels if fewer than expected
+                    if n_ch < self.n_channels:
+                        pad = np.zeros((self.n_channels - n_ch, epoch_data.shape[1]))
+                        epoch_data = np.concatenate([epoch_data, pad], axis=0)
+
+                    # Split into non-overlapping 30s epochs
+                    for start in range(0, epoch_data.shape[1] - self.samples_per_epoch,
+                                       self.samples_per_epoch):
+                        epoch = epoch_data[:, start:start + self.samples_per_epoch]
+                        data.append(torch.FloatTensor(epoch))
+
+                except Exception as e:
+                    print(f"Skipping {file_path}: {e}")
+                    continue
+
+        if not data:
+            raise RuntimeError(f"No .pt or .gdf files found under {data_path}")
 
         print(f"Loaded {len(data)} epochs total")
         return data
