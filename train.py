@@ -6,10 +6,6 @@ Launch:
 """
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0,2'   # only the two L40S are visible
-# After this, PyTorch sees exactly 2 devices: cuda:0 and cuda:1 (both L40S)
-# ─────────────────────────────────────────────────────────────────────────────
-
 import torch
 import torch.nn as nn
 import numpy as np
