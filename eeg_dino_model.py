@@ -1,7 +1,4 @@
-"""
-EEG-DINO Model — Teacher/Student Architecture
-==============================================
-"""
+"""EEG-DINO Model — Student/Teacher with DINO heads."""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,185 +6,111 @@ from tfe_module import TimeFrequencyEmbedding
 from dpe_module import DecoupledPositionalEmbedding
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Projection head with L2 normalization
-# ─────────────────────────────────────────────────────────────────────────────
-
 class DINOHead(nn.Module):
-    """
-    MLP projection head following DINO convention:
-        Linear → GELU → Linear → L2-normalize → weight-normalized linear
+    """MLP → L2-norm → weight-normalized projection (anti-collapse)."""
 
-    The L2 normalization step is the critical anti-collapse component.
-    It ensures all feature vectors live on a unit hypersphere so the model
-    cannot collapse by growing magnitudes — it must learn directions instead.
-
-    The final weight-normalized linear layer (the "prototypes" layer) is also
-    standard in DINO and further stabilizes training by keeping the prototype
-    norms bounded.
-    """
-    def __init__(self, in_dim, hidden_dim, out_dim=256):
+    def __init__(self, in_dim, hidden_dim, out_dim=64):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
+            nn.Linear(in_dim, hidden_dim), nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.GELU(),
             nn.Linear(hidden_dim, out_dim),
         )
-        # Weight-normalized prototype layer — no bias
         self.last_layer = nn.utils.weight_norm(
             nn.Linear(out_dim, out_dim, bias=False)
         )
-        # Fix the weight_g norm to 1 at init (standard DINO practice)
         self.last_layer.weight_g.data.fill_(1)
-        self.last_layer.weight_g.requires_grad = False  # only direction is learned
+        self.last_layer.weight_g.requires_grad = False
 
     def forward(self, x):
         x = self.mlp(x)
-        # L2 normalize onto unit hypersphere — the anti-collapse core
         x = F.normalize(x, dim=-1, p=2)
-        x = self.last_layer(x)
-        return x
+        return self.last_layer(x)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Transformer backbone
-# ─────────────────────────────────────────────────────────────────────────────
 
 class EEGTransformer(nn.Module):
-    """
-    Transformer encoder for EEG-DINO.
-    Table 1 — EEG-DINO-S: 12 layers, hidden=200, MLP=512
-    """
-    def __init__(self, embed_dim=200, n_layers=12, n_heads=8,
-                 mlp_dim=512, dropout=0.1):
+    """Pre-norm Transformer encoder with CLS token."""
+
+    def __init__(self, embed_dim=64, n_layers=2, n_heads=4,
+                 mlp_dim=128, dropout=0.1):
         super().__init__()
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim,
-            nhead=n_heads,
-            dim_feedforward=mlp_dim,
-            dropout=dropout,
-            batch_first=True,
-            norm_first=True   # pre-norm
+        layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim, nhead=n_heads, dim_feedforward=mlp_dim,
+            dropout=dropout, batch_first=True, norm_first=True,
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer,
-                                                  num_layers=n_layers)
+        self.transformer = nn.TransformerEncoder(layer, num_layers=n_layers)
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
-        """
-        x: [batch, n_tokens, embed_dim]
-        Returns: cls_token [batch, embed_dim], patch_tokens [batch, n_tokens, embed_dim]
-        """
         B = x.shape[0]
-        cls = self.cls_token.expand(B, -1, -1)
-        x   = torch.cat([cls, x], dim=1)
-        x   = self.transformer(x)
-        x   = self.norm(x)
-        return x[:, 0], x[:, 1:]
+        x = torch.cat([self.cls_token.expand(B, -1, -1), x], dim=1)
+        x = self.norm(self.transformer(x))
+        return x[:, 0], x[:, 1:]  # cls, patches
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Student model
-# ─────────────────────────────────────────────────────────────────────────────
 
 class StudentModel(nn.Module):
     """
-    Student model for EEG-DINO.
-
-    channel_indices handling:
-      - 1D [n_selected_ch]:          standard single-GPU / teacher path
-      - 2D [batch_slice, n_ch]:      DataParallel path (train.py expands to 2D
-                                     before the call so DP can split on dim=0)
-    _resolve_channel_indices() normalises both cases to 1D.
+    Full student: TFE → DPE → Transformer → signal/patch heads.
+    Handles channel_indices as 1D or 2D (DataParallel).
     """
-    def __init__(self, n_channels=19, sampling_rate=200, embed_dim=200,
-                 n_layers=12, n_heads=8, mlp_dim=512):
+
+    def __init__(self, n_channels=2, sampling_rate=200, embed_dim=64,
+                 n_layers=2, n_heads=4, mlp_dim=128, out_dim=64):
         super().__init__()
-
-        self.tfe         = TimeFrequencyEmbedding(n_channels, sampling_rate, embed_dim)
-        self.dpe         = DecoupledPositionalEmbedding(n_channels, embed_dim)
+        self.out_dim = out_dim
+        self.tfe = TimeFrequencyEmbedding(n_channels, sampling_rate, embed_dim)
+        self.dpe = DecoupledPositionalEmbedding(n_channels, embed_dim)
         self.transformer = EEGTransformer(embed_dim, n_layers, n_heads, mlp_dim)
-
-        # Both heads use the L2-normalizing DINOHead
-        self.signal_head = DINOHead(embed_dim, mlp_dim, out_dim=256)
-        self.patch_head  = DINOHead(embed_dim, mlp_dim, out_dim=256)
+        self.signal_head = DINOHead(embed_dim, mlp_dim, out_dim)
+        self.patch_head = DINOHead(embed_dim, mlp_dim, out_dim)
 
     @staticmethod
-    def _resolve_channel_indices(channel_indices):
-        """
-        Normalise to guaranteed 1D tensor.
-        DataParallel expands [n_ch] → [batch, n_ch]; we take row 0 (all identical).
-        """
-        if channel_indices is None:
+    def _resolve_ci(ci):
+        if ci is None:
             return None
-        if channel_indices.dim() == 2:
-            return channel_indices[0]
-        return channel_indices
+        return ci[0] if ci.dim() == 2 else ci
 
     def forward(self, x, channel_indices=None, return_patch=False):
-        """
-        x:               [batch, n_selected_ch, n_samples]
-        channel_indices: 1D or 2D (see class docstring)
-        return_patch:    if True also return patch-level features
-        """
-        ci = self._resolve_channel_indices(channel_indices)
+        ci = self._resolve_ci(channel_indices)
 
-        # Pad back to full channel count if a subset was passed
+        # Pad to full channel count if subset was passed
         if ci is not None and x.shape[1] < self.tfe.n_channels:
-            full_x = torch.zeros(
-                x.shape[0], self.tfe.n_channels, x.shape[2],
-                device=x.device, dtype=x.dtype
-            )
-            full_x[:, ci, :] = x
-            x = full_x
+            full = torch.zeros(x.shape[0], self.tfe.n_channels, x.shape[2],
+                               device=x.device, dtype=x.dtype)
+            full[:, ci, :] = x
+            x = full
 
-        tokens = self.tfe(x)
-        tokens = self.dpe(tokens, ci)
-        cls_token, patch_tokens = self.transformer(tokens)
-
-        signal_features = self.signal_head(cls_token)
+        tokens = self.dpe(self.tfe(x), ci)
+        cls, patches = self.transformer(tokens)
+        sig = self.signal_head(cls)
 
         if return_patch:
-            # Apply head to each patch token independently
-            B, T, D = patch_tokens.shape
-            patch_flat     = patch_tokens.reshape(B * T, D)
-            patch_features = self.patch_head(patch_flat).reshape(B, T, -1)
-            return signal_features, patch_features
+            B, T, D = patches.shape
+            pat = self.patch_head(patches.reshape(B * T, D)).reshape(B, T, -1)
+            return sig, pat
+        return sig
 
-        return signal_features
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Teacher model
-# ─────────────────────────────────────────────────────────────────────────────
 
 class TeacherModel(nn.Module):
-    """
-    EMA copy of the student.
-    Always receives the raw (unwrapped) StudentModel — never a DataParallel obj.
-    train.py guarantees this by constructing TeacherModel before wrapping the
-    student in DataParallel.
-    """
+    """EMA copy of the student. No gradients, updated externally."""
+
     def __init__(self, student: StudentModel):
         super().__init__()
-
         self.model = StudentModel(
-            n_channels   = student.tfe.n_channels,
-            sampling_rate= student.tfe.sampling_rate,
-            embed_dim    = student.transformer.cls_token.shape[-1],
-            n_layers     = len(student.transformer.transformer.layers),
-            n_heads      = student.transformer.transformer.layers[0].self_attn.num_heads,
-            mlp_dim      = student.signal_head.mlp[0].out_features
+            n_channels=student.tfe.n_channels,
+            sampling_rate=student.tfe.sampling_rate,
+            embed_dim=student.transformer.cls_token.shape[-1],
+            n_layers=len(student.transformer.transformer.layers),
+            n_heads=student.transformer.transformer.layers[0].self_attn.num_heads,
+            mlp_dim=student.signal_head.mlp[0].out_features,
+            out_dim=student.out_dim,
         )
         self.model.load_state_dict(student.state_dict())
-
         for p in self.parameters():
             p.requires_grad = False
 
-        self.register_buffer('center', torch.zeros(1, 256))
+        self.register_buffer('center', torch.zeros(1, student.out_dim))
         self.center_momentum = 0.9
 
     @torch.no_grad()
@@ -196,6 +119,5 @@ class TeacherModel(nn.Module):
 
     @torch.no_grad()
     def update_center(self, teacher_output):
-        batch_center = teacher_output.mean(dim=0, keepdim=True)
-        self.center  = (self.center * self.center_momentum
-                        + batch_center * (1 - self.center_momentum))
+        bc = teacher_output.mean(dim=0, keepdim=True)
+        self.center = self.center * self.center_momentum + bc * (1 - self.center_momentum)
