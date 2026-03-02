@@ -181,24 +181,18 @@ class EEGDINOTrainer:
         self.warmup_epochs = warmup_epochs
         self.n_epochs = n_epochs
 
-        # Student → Teacher (before DataParallel)
+        # Resolve device — single GPU by default, safe multi-GPU only
+        # via CUDA_VISIBLE_DEVICES=0,1 (set before launching)
+        if device == 'cpu' or not torch.cuda.is_available():
+            self.device = 'cpu'
+        else:
+            self.device = 'cuda:0'
+
         self.student = StudentModel(
             n_channels, sampling_rate, embed_dim,
             n_layers, n_heads, mlp_dim, out_dim
-        ).to(device)
-        self.teacher = TeacherModel(self.student).to(device)
-
-        # Multi-GPU
-        n_gpu = torch.cuda.device_count()
-        if device == 'cpu':
-            pass
-        elif n_gpu >= 2:
-            self.student = nn.DataParallel(self.student, device_ids=list(range(n_gpu)))
-            self.device = 'cuda:0'
-        elif n_gpu == 1:
-            self.device = 'cuda:0'
-        else:
-            self.device = 'cpu'
+        ).to(self.device)
+        self.teacher = TeacherModel(self.student).to(self.device)
 
         self.sampler = ChannelAwareSampling(
             n_channels, sampling_rate, n_local_views, n_masked_views)
