@@ -55,10 +55,14 @@ class SleepEDFDataset(Dataset):
                 t = F.interpolate(t.unsqueeze(0), size=self.epoch_len,
                                   mode='linear', align_corners=False).squeeze(0)
 
-                # Z-score on real channels, then trim
+                # Z-score, then ensure exactly n_channels (trim or pad)
                 real = t[:min(t.shape[0], n_channels)]
                 t = (t - real.mean()) / (real.std() + 1e-8)
-                t = t[:n_channels]
+                if t.shape[0] >= n_channels:
+                    t = t[:n_channels]
+                else:
+                    pad = torch.zeros(n_channels - t.shape[0], t.shape[1])
+                    t = torch.cat([t, pad], dim=0)
 
                 self.data.append(t)
                 self.labels.append(label)

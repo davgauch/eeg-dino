@@ -76,6 +76,7 @@ class StudentModel(nn.Module):
 
         # Pad to full channel count if subset was passed
         if ci is not None and x.shape[1] < self.tfe.n_channels:
+            ci = ci.clamp(0, self.tfe.n_channels - 1)
             full = torch.zeros(x.shape[0], self.tfe.n_channels, x.shape[2],
                                device=x.device, dtype=x.dtype)
             full[:, ci, :] = x

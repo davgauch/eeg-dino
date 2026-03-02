@@ -22,6 +22,7 @@ class DecoupledPositionalEmbedding(nn.Module):
             channel_indices = torch.arange(self.n_channels, device=tokens.device)
 
         # Pc: average spatial embedding over present channels
+        channel_indices = channel_indices.clamp(0, self.n_channels - 1)
         if channel_indices.dim() == 2:
             spatial = self.channel_embedding(channel_indices).mean(dim=1)
             spatial = spatial.unsqueeze(1).expand(B, T, -1)

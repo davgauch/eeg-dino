@@ -14,9 +14,9 @@ class ChannelAwareSampling:
     def _random_crop(self, x, ch_frac, time_frac):
         """Select ch_frac channels and time_frac temporal window."""
         B, C, T = x.shape
-        n_ch = max(1, int(ch_frac * C))
+        n_ch = max(1, int(ch_frac * min(C, self.n_channels)))
         n_t = int(time_frac * T)
-        ch_idx = np.sort(np.random.choice(C, n_ch, replace=False))
+        ch_idx = np.sort(np.random.choice(min(C, self.n_channels), n_ch, replace=False))
         t_start = np.random.randint(0, T - n_t + 1)
         return x[:, ch_idx, t_start:t_start + n_t], torch.LongTensor(ch_idx)
 
