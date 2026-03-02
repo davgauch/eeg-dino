@@ -1,29 +1,18 @@
 """
 EEG-DINO Pre-Training
 =====================
-Paper: "EEG-DINO: Learning EEG Foundation Models via Hierarchical Self-Distillation"
-Model: EEG-DINO-S (Table 1): 12 layers, hidden=200, MLP=512, 4.6M params
-
-Collapse fixes applied vs previous run:
-  1. LR back to 1e-4 (2e-4 was too high and triggered collapse)
-  2. Linear LR warmup for first 10 epochs (standard DINO practice)
-  3. Gradient clipping max_norm=3.0 (prevents the spike that starts collapse)
-  4. Teacher momentum cosine schedule 0.996 → 1.0 (paper default)
-  5. Weight decay cosine schedule 0.04 → 0.4 (paper default)
-
-Split strategy:
-  - Sleep-EDF: uses the existing TrainFold/ValidFold/TestFold folder structure
-  - BCI: random 80/10/10 split saved to splits.json (original files untouched)
-  - splits.json lives in ~/eeg-dino/ and is never written to the data server
-
 Launch:
   CUDA_VISIBLE_DEVICES=0,2 nohup python train.py > train.log 2>&1 &
 """
 
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,2'   # only the two L40S are visible
+# After this, PyTorch sees exactly 2 devices: cuda:0 and cuda:1 (both L40S)
+# ─────────────────────────────────────────────────────────────────────────────
+
 import torch
 import torch.nn as nn
 import numpy as np
-import os
 import json
 import math
 from tqdm import tqdm
