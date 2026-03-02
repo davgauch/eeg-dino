@@ -366,13 +366,13 @@ class EEGDINOTrainer:
 
 PRESETS = {
     'tiny': dict(
-        embed_dim=64, n_layers=2, n_heads=4, mlp_dim=128, out_dim=64,
+        embed_dim=64, n_layers=2, n_heads=4, mlp_dim=128, out_dim=256,
         n_local_views=4, n_masked_views=1, batch_size=64,
         learning_rate=5e-4, warmup_epochs=5,
         weight_decay_start=0.04, weight_decay_end=0.20,
     ),
     'small': dict(
-        embed_dim=128, n_layers=4, n_heads=4, mlp_dim=256, out_dim=128,
+        embed_dim=128, n_layers=4, n_heads=4, mlp_dim=256, out_dim=256,
         n_local_views=6, n_masked_views=2, batch_size=64,
         learning_rate=3e-4, warmup_epochs=5,
         weight_decay_start=0.04, weight_decay_end=0.30,
