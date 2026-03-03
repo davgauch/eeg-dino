@@ -1,9 +1,10 @@
 """EEG-DINO Model — Student/Teacher with DINO projection heads.
 
-Head architecture follows DINO/DINOv2:
-  hidden_dim=2048, bottleneck_dim=256, out_dim=4096.
-  These are FIXED across backbone sizes (the head is discarded after
-  pre-training; only the backbone is kept for downstream tasks).
+Head architecture follows DINO/DINOv2 (3-layer MLP → L2-norm → weight-norm).
+The paper uses hidden_dim=2048, bottleneck_dim=256 for ViT-S/B (22–86M backbone).
+For our smaller backbones we scale proportionally: hidden_dim = 4×embed_dim,
+bottleneck_dim = embed_dim, keeping out_dim=4096.  This maintains a healthy
+backbone-to-head ratio so the backbone receives sufficient gradient signal.
 """
 import torch
 import torch.nn as nn

@@ -381,17 +381,15 @@ class EEGDINOTrainer:
 
 
 # ── Presets ──────────────────────────────────────────────────────────────────
-
-# ── Presets ──────────────────────────────────────────────────────────────────
-# Backbone scales across presets; DINO head is FIXED at paper values
-# (hidden_dim=2048, bottleneck_dim=256, out_dim=4096) for all sizes.
-# The head is discarded after pre-training — only backbone matters downstream.
+# Head dims scale as 4×embed_dim (hidden) and embed_dim (bottleneck) to keep
+# a healthy backbone-to-head ratio.  DINO paper uses 2048/256 for ViT-S/B
+# (22–86M backbone); we scale proportionally for smaller backbones.
 # LR follows DINO scaling: base_lr (5e-4) × batch_size / 256.
 
 PRESETS = {
     'tiny': dict(
         embed_dim=64, n_layers=2, n_heads=4, mlp_dim=128,
-        out_dim=4096, head_hidden_dim=2048, head_bottleneck_dim=256,
+        out_dim=4096, head_hidden_dim=256, head_bottleneck_dim=64,
         n_local_views=4, n_masked_views=1, batch_size=64,
         learning_rate=1.25e-4,   # 5e-4 × 64/256
         warmup_epochs=10,
@@ -399,7 +397,7 @@ PRESETS = {
     ),
     'small': dict(
         embed_dim=128, n_layers=4, n_heads=4, mlp_dim=256,
-        out_dim=4096, head_hidden_dim=2048, head_bottleneck_dim=256,
+        out_dim=4096, head_hidden_dim=512, head_bottleneck_dim=128,
         n_local_views=6, n_masked_views=2, batch_size=64,
         learning_rate=1.25e-4,   # 5e-4 × 64/256
         warmup_epochs=10,
@@ -407,7 +405,7 @@ PRESETS = {
     ),
     'base': dict(
         embed_dim=200, n_layers=12, n_heads=8, mlp_dim=512,
-        out_dim=4096, head_hidden_dim=2048, head_bottleneck_dim=256,
+        out_dim=4096, head_hidden_dim=800, head_bottleneck_dim=256,
         n_local_views=8, n_masked_views=2, batch_size=256,
         learning_rate=5e-4,      # 5e-4 × 256/256
         warmup_epochs=10,
