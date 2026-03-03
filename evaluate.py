@@ -1,9 +1,8 @@
-"""
-EEG-DINO Linear Probing Evaluation
-===================================
+"""EEG-DINO Linear Probing Evaluation.
+
 Usage:
-  python evaluate.py --checkpoint checkpoints/best_model.pth --preset tiny
-  python evaluate.py --checkpoint checkpoints/best_model.pth --preset small --max_samples 5000
+  python evaluate.py --checkpoint checkpoints/best_model.pth
+  python evaluate.py --checkpoint checkpoints/best_model.pth --max_samples 5000
 """
 
 import argparse, torch, numpy as np
@@ -15,20 +14,17 @@ from tqdm import tqdm
 from eeg_dino_model import EEGTransformer
 from tfe_module import TimeFrequencyEmbedding
 from dpe_module import DecoupledPositionalEmbedding
-from train import SleepEDFDataset, SLEEP_EDF_PATH, PRESETS
+from train import SleepEDFDataset, SLEEP_EDF_PATH, CONFIG
 
 
 class FrozenBackbone(nn.Module):
-    """Student backbone (TFE→DPE→Transformer) with frozen weights."""
+    """Backbone (TFE → DPE → Transformer) with frozen weights."""
 
     def __init__(self, n_channels, sampling_rate, embed_dim, n_layers, n_heads, mlp_dim):
         super().__init__()
         self.tfe = TimeFrequencyEmbedding(n_channels, sampling_rate, embed_dim)
         self.dpe = DecoupledPositionalEmbedding(n_channels, embed_dim)
         self.transformer = EEGTransformer(embed_dim, n_layers, n_heads, mlp_dim)
-        self.freeze()
-
-    def freeze(self):
         for p in self.parameters():
             p.requires_grad = False
 
@@ -38,7 +34,7 @@ class FrozenBackbone(nn.Module):
             channel_indices = channel_indices.unsqueeze(0).expand(x.shape[0], -1)
         tokens = self.tfe(x)
         tokens = self.dpe(tokens, channel_indices)
-        cls, patches = self.transformer(tokens)
+        cls, _ = self.transformer(tokens)
         return cls
 
 
@@ -135,29 +131,23 @@ def evaluate_probe(probe, backbone, loader, device, class_names=None):
 def main():
     p = argparse.ArgumentParser(description='EEG-DINO Linear Probing')
     p.add_argument('--checkpoint', required=True, help='Path to best_model.pth')
-    p.add_argument('--preset', default='tiny', choices=PRESETS)
-    p.add_argument('--n_channels', type=int, default=2)
     p.add_argument('--n_classes', type=int, default=5)
     p.add_argument('--max_samples', type=int, default=None)
     p.add_argument('--probe_epochs', type=int, default=50)
     p.add_argument('--probe_lr', type=float, default=1e-3)
+    p.add_argument('--preset', default='tiny', choices=['tiny'])  # compat only
     args = p.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    pr = PRESETS[args.preset]
 
-    # Load backbone from checkpoint
     backbone = FrozenBackbone(
-        args.n_channels, 200,
-        pr['embed_dim'], pr['n_layers'], pr['n_heads'], pr['mlp_dim']
+        CONFIG['n_channels'], CONFIG['sampling_rate'],
+        CONFIG['embed_dim'], CONFIG['n_layers'], CONFIG['n_heads'], CONFIG['mlp_dim']
     ).to(device)
 
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=True)
-    student_sd = ckpt['student']
-
-    # Map keys: strip student prefix, keep backbone layers
     bb_sd = {}
-    for k, v in student_sd.items():
+    for k, v in ckpt['student'].items():
         for prefix in ('tfe.', 'dpe.', 'transformer.'):
             if k.startswith(prefix):
                 bb_sd[k] = v
@@ -166,12 +156,10 @@ def main():
     print(f"Loaded backbone from {args.checkpoint} (epoch {ckpt.get('epoch', '?')})")
 
     # Load Sleep-EDF splits
-    train_ds = SleepEDFDataset(SLEEP_EDF_PATH, 'TrainFold',
-                                args.n_channels, 200, args.max_samples)
-    val_ds = SleepEDFDataset(SLEEP_EDF_PATH, 'ValidFold',
-                              args.n_channels, 200, args.max_samples)
-    test_ds = SleepEDFDataset(SLEEP_EDF_PATH, 'TestFold',
-                               args.n_channels, 200, args.max_samples)
+    n_ch, sr = CONFIG['n_channels'], CONFIG['sampling_rate']
+    train_ds = SleepEDFDataset(SLEEP_EDF_PATH, 'TrainFold', n_ch, sr, args.max_samples)
+    val_ds   = SleepEDFDataset(SLEEP_EDF_PATH, 'ValidFold', n_ch, sr, args.max_samples)
+    test_ds  = SleepEDFDataset(SLEEP_EDF_PATH, 'TestFold',  n_ch, sr, args.max_samples)
 
     train_loader = DataLoader(train_ds, 256, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_ds, 256, num_workers=4)
@@ -180,7 +168,7 @@ def main():
     # Train linear probe
     probe, val_acc = train_linear_probe(
         backbone, train_loader, val_loader, args.n_classes,
-        pr['embed_dim'], device, args.probe_epochs, args.probe_lr)
+        CONFIG['embed_dim'], device, args.probe_epochs, args.probe_lr)
 
     # Evaluate on test
     class_names = ['Wake', 'N1', 'N2', 'N3', 'REM']

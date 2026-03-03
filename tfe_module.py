@@ -1,9 +1,10 @@
-"""Time-Frequency Embedding — tokenizes EEG into 1-second windows."""
+"""Time-Frequency Embedding (TFE) — tokenizes EEG into 1-second windows."""
 import torch.nn as nn
 
 
 class TimeFrequencyEmbedding(nn.Module):
-    """Each token = 1 second of all channels, linearly projected."""
+    """Splits EEG into 1s windows and projects each to embed_dim.
+    Input: [B, C, T] → Output: [B, n_tokens, embed_dim]"""
 
     def __init__(self, n_channels=2, sampling_rate=200, embed_dim=64):
         super().__init__()
@@ -13,7 +14,6 @@ class TimeFrequencyEmbedding(nn.Module):
         self.projection = nn.Linear(n_channels * sampling_rate, embed_dim)
 
     def forward(self, x):
-        # x: [B, C, T] → [B, n_tokens, embed_dim]
         B, C, T = x.shape
         n_tok = T // self.samples_per_token
         x = x[:, :, :n_tok * self.samples_per_token]

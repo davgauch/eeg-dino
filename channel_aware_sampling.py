@@ -1,13 +1,12 @@
-"""Channel-Aware Sampling — paper-faithful multi-scale view generation.
+"""Channel-Aware Sampling — multi-scale view generation for DINO.
 
-Global views: ~70% of channels (ceil), 80% temporal window.
-Local views:  ~30% of channels (floor), 50% temporal window.
-Masked views: global crop + 20% channel/temporal patch masking.
+Global views: ceil(70%) channels, 80% temporal window.
+Local views:  floor(30%) channels, 50% temporal window.
+Masked views: global crop + 20% channel & temporal patch masking.
 
-For global views, ceil() is used for channel count to maintain the paper's
-intended asymmetry (global >> local information) with small channel counts.
-With C=2: global=2ch (100%), local=1ch (50%) — ratio 2×.
-With C=19: global=14ch (74%), local=5ch (26%) — ratio 2.8× (paper: 2.6×).
+ceil() for global channels preserves asymmetry with small channel counts:
+  C=2 → global=2ch (100%), local=1ch (50%).
+  C=19 → global=14ch (74%), local=5ch (26%).
 """
 import math
 import torch
@@ -24,17 +23,12 @@ class ChannelAwareSampling:
         self.n_masked_views = n_masked_views
 
     def _random_crop(self, x, ch_frac, time_frac, ceil_ch=False):
-        """Select ch_frac of channels and time_frac temporal window.
-        If ceil_ch, round up channel count (used for global views)."""
         B, C, T = x.shape
         n_t = int(time_frac * T)
         t_start = np.random.randint(0, T - n_t + 1)
 
         C_eff = min(C, self.n_channels)
-        if ceil_ch:
-            n_ch = max(1, math.ceil(ch_frac * C_eff))
-        else:
-            n_ch = max(1, int(ch_frac * C_eff))
+        n_ch = max(1, math.ceil(ch_frac * C_eff) if ceil_ch else int(ch_frac * C_eff))
         n_ch = min(n_ch, C_eff)
         ch_idx = np.sort(np.random.choice(C_eff, n_ch, replace=False))
 
@@ -50,12 +44,10 @@ class ChannelAwareSampling:
         view, ch_idx = self.create_global_view(x)
         _, C, T = view.shape
 
-        # Channel masking (20%) — only when >1 channel present
         if C > 1:
             n_mask = max(1, int(0.2 * C))
             view[:, np.random.choice(C, n_mask, replace=False), :] = 0
 
-        # Temporal patch masking (20% of 1-second patches)
         ps = self.sampling_rate
         n_patches = T // ps
         n_mask_t = max(1, int(0.2 * n_patches))

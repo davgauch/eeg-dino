@@ -1,10 +1,8 @@
 """EEG-DINO Model — Student/Teacher with DINO projection heads.
 
-Head architecture follows DINO/DINOv2 (3-layer MLP → L2-norm → weight-norm).
-The paper uses hidden_dim=2048, bottleneck_dim=256 for ViT-S/B (22–86M backbone).
-For our smaller backbones we scale proportionally: hidden_dim = 4×embed_dim,
-bottleneck_dim = embed_dim, keeping out_dim=4096.  This maintains a healthy
-backbone-to-head ratio so the backbone receives sufficient gradient signal.
+Head dims are scaled proportionally to backbone size (hidden=4*embed_dim,
+bottleneck=embed_dim) to maintain a healthy backbone-to-head gradient ratio.
+The original paper uses hidden=2048, bottleneck=256 for ViT-S/B (~22-86M).
 """
 import torch
 import torch.nn as nn
@@ -14,19 +12,9 @@ from dpe_module import DecoupledPositionalEmbedding
 
 
 class DINOHead(nn.Module):
-    """DINO projection head (paper-faithful).
+    """3-layer MLP → L2-norm → weight-normalized projection."""
 
-    Architecture:
-        Linear(in_dim, hidden_dim) → GELU →
-        Linear(hidden_dim, hidden_dim) → GELU →
-        Linear(hidden_dim, bottleneck_dim) → L2-norm →
-        weight_norm Linear(bottleneck_dim, out_dim)
-
-    Weight init: trunc_normal(std=0.02) as in DINO reference code.
-    """
-
-    def __init__(self, in_dim, hidden_dim=2048, out_dim=4096,
-                 bottleneck_dim=256):
+    def __init__(self, in_dim, hidden_dim=256, out_dim=4096, bottleneck_dim=64):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden_dim), nn.GELU(),
@@ -54,7 +42,7 @@ class DINOHead(nn.Module):
 
 
 class EEGTransformer(nn.Module):
-    """Pre-norm Transformer encoder with CLS token."""
+    """Pre-norm Transformer encoder with learnable CLS token."""
 
     def __init__(self, embed_dim=64, n_layers=2, n_heads=4,
                  mlp_dim=128, dropout=0.1):
@@ -71,21 +59,15 @@ class EEGTransformer(nn.Module):
         B = x.shape[0]
         x = torch.cat([self.cls_token.expand(B, -1, -1), x], dim=1)
         x = self.norm(self.transformer(x))
-        return x[:, 0], x[:, 1:]  # cls, patches
+        return x[:, 0], x[:, 1:]  # (cls, patches)
 
 
 class StudentModel(nn.Module):
-    """
-    Full student: TFE → DPE → Transformer → signal/patch heads.
-
-    head_hidden_dim and head_bottleneck_dim control the DINO projection
-    heads and are independent of the backbone's mlp_dim/embed_dim.
-    Paper defaults: hidden_dim=2048, bottleneck_dim=256.
-    """
+    """TFE → DPE → Transformer → signal head + patch head."""
 
     def __init__(self, n_channels=2, sampling_rate=200, embed_dim=64,
                  n_layers=2, n_heads=4, mlp_dim=128, out_dim=4096,
-                 head_hidden_dim=2048, head_bottleneck_dim=256):
+                 head_hidden_dim=256, head_bottleneck_dim=64):
         super().__init__()
         self.out_dim = out_dim
         self.head_hidden_dim = head_hidden_dim
@@ -93,10 +75,8 @@ class StudentModel(nn.Module):
         self.tfe = TimeFrequencyEmbedding(n_channels, sampling_rate, embed_dim)
         self.dpe = DecoupledPositionalEmbedding(n_channels, embed_dim)
         self.transformer = EEGTransformer(embed_dim, n_layers, n_heads, mlp_dim)
-        self.signal_head = DINOHead(embed_dim, head_hidden_dim, out_dim,
-                                    head_bottleneck_dim)
-        self.patch_head = DINOHead(embed_dim, head_hidden_dim, out_dim,
-                                   head_bottleneck_dim)
+        self.signal_head = DINOHead(embed_dim, head_hidden_dim, out_dim, head_bottleneck_dim)
+        self.patch_head = DINOHead(embed_dim, head_hidden_dim, out_dim, head_bottleneck_dim)
 
     @staticmethod
     def _resolve_ci(ci):
@@ -107,7 +87,6 @@ class StudentModel(nn.Module):
     def forward(self, x, channel_indices=None, return_patch=False):
         ci = self._resolve_ci(channel_indices)
 
-        # Pad to full channel count if subset was passed
         if ci is not None and x.shape[1] < self.tfe.n_channels:
             ci = ci.clamp(0, self.tfe.n_channels - 1)
             full = torch.zeros(x.shape[0], self.tfe.n_channels, x.shape[2],
@@ -127,7 +106,7 @@ class StudentModel(nn.Module):
 
 
 class TeacherModel(nn.Module):
-    """EMA copy of the student. No gradients, updated externally."""
+    """EMA copy of the student — no gradients, updated externally."""
 
     def __init__(self, student: StudentModel):
         super().__init__()

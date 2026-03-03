@@ -1,35 +1,52 @@
-"""
-EEG-DINO Pre-Training
-=====================
+"""EEG-DINO Pre-Training on Sleep-EDF.
+
 Usage:
-  python train.py --preset tiny --dataset sleep
-  python train.py --preset small --dataset sleep --max_train 5000
-  python train.py --preset base --dataset both --n_channels 2
+  python train.py                                        # default tiny config
+  python train.py --n_epochs 200 --save_dir checkpoints  # longer run
+  python train.py --max_train 5000                       # quick test
 
-For server:
-  CUDA_VISIBLE_DEVICES=0,2 nohup python train.py --preset tiny --dataset sleep > train.log 2>&1 &
+Server:
+  CUDA_VISIBLE_DEVICES=0 nohup python train.py > train.log 2>&1 &
 """
 
-import os, json, math, argparse
+import os, math, argparse
 import torch
 import torch.nn as nn
 import numpy as np
 from tqdm import tqdm
-from torch.utils.data import Dataset, DataLoader, ConcatDataset
+from torch.utils.data import Dataset, DataLoader
 
 from eeg_dino_model import StudentModel, TeacherModel
 from channel_aware_sampling import ChannelAwareSampling
 from losses import DINOLoss, PatchLoss
 
 SLEEP_EDF_PATH = '/net/inltitan2.epfl.ch/scratch2/tzhu/EEGPT/datasets/downstream/sleep_edf/'
-BCI_PATH       = '/net/inltitan2.epfl.ch/scratch2/tzhu/EEGPT/datasets/downstream/Raw_data/'
-SPLITS_FILE    = './splits.json'
+
+# ── Model config ─────────────────────────────────────────────────────────────
+# Tiny backbone adapted for 2-channel Sleep-EDF data.
+# Head dims scaled proportionally (4×embed_dim / embed_dim) instead of
+# paper defaults (2048/256) which caused gradient starvation at this scale.
+
+CONFIG = dict(
+    n_channels=2, sampling_rate=200,
+    embed_dim=64, n_layers=2, n_heads=4, mlp_dim=128,
+    out_dim=4096, head_hidden_dim=256, head_bottleneck_dim=64,
+    n_local_views=4, n_masked_views=1, batch_size=64,
+    learning_rate=1.25e-4,       # DINO scaling: 5e-4 × 64/256
+    warmup_epochs=10,
+    weight_decay_start=0.04, weight_decay_end=0.40,
+    momentum_start=0.996, momentum_end=1.0,
+    n_epochs=100,
+)
+
+# Preset dict kept for evaluate.py compatibility
+PRESETS = {'tiny': CONFIG}
 
 
-# ── Datasets ─────────────────────────────────────────────────────────────────
+# ── Dataset ──────────────────────────────────────────────────────────────────
 
 class SleepEDFDataset(Dataset):
-    """Sleep-EDF .pt files → z-scored 30s epochs. Native: 2 channels at 100 Hz."""
+    """Sleep-EDF .pt files — z-scored, resampled 100→200 Hz, 30s epochs."""
 
     def __init__(self, root, fold='TrainFold', n_channels=2,
                  sampling_rate=200, max_samples=None):
@@ -55,7 +72,7 @@ class SleepEDFDataset(Dataset):
                 t = F.interpolate(t.unsqueeze(0), size=self.epoch_len,
                                   mode='linear', align_corners=False).squeeze(0)
 
-                # Z-score, then ensure exactly n_channels (trim or pad)
+                # Z-score per epoch
                 real = t[:min(t.shape[0], n_channels)]
                 t = (t - real.mean()) / (real.std() + 1e-8)
                 if t.shape[0] >= n_channels:
@@ -77,71 +94,8 @@ class SleepEDFDataset(Dataset):
         return self.data[idx], self.labels[idx]
 
 
-class BCIDataset(Dataset):
-    """BCI-IV-2a .gdf files → z-scored 30s epochs. Native: 22 EEG at 250 Hz."""
-
-    def __init__(self, root, split='train', n_channels=2,
-                 sampling_rate=200, splits_file=SPLITS_FILE,
-                 seed=42, max_samples=None):
-        from glob import glob
-        import mne, warnings
-
-        self.n_channels = n_channels
-        self.sampling_rate = sampling_rate
-        self.epoch_len = sampling_rate * 30
-
-        gdf_files = sorted(glob(os.path.join(root, '**/*.gdf'), recursive=True))
-
-        # Deterministic train/val/test split by file
-        if os.path.exists(splits_file):
-            with open(splits_file) as f:
-                splits = json.load(f)
-        else:
-            rng = np.random.default_rng(seed)
-            idx = rng.permutation(len(gdf_files)).tolist()
-            nv = max(1, int(0.1 * len(idx)))
-            splits = {'train': idx[nv*2:], 'val': idx[:nv], 'test': idx[nv:nv*2]}
-            with open(splits_file, 'w') as f:
-                json.dump(splits, f, indent=2)
-
-        files = [gdf_files[i] for i in splits[split]]
-        print(f"[BCI/{split}] {len(files)} files, loading...")
-
-        self.data, self.labels = [], []
-        for fp in tqdm(files, desc=f"BCI/{split}"):
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    raw = mne.io.read_raw_gdf(fp, preload=True, verbose=False)
-
-                picks = mne.pick_types(raw.info, eeg=True, exclude='bads')[:n_channels]
-                raw.resample(sampling_rate)
-                data = raw.get_data(picks=picks)
-
-                if data.shape[0] < n_channels:
-                    pad = np.zeros((n_channels - data.shape[0], data.shape[1]))
-                    data = np.concatenate([data, pad], axis=0)
-
-                for s in range(0, data.shape[1] - self.epoch_len, self.epoch_len):
-                    seg = torch.FloatTensor(data[:, s:s + self.epoch_len])
-                    seg = (seg - seg.mean()) / (seg.std() + 1e-8)
-                    self.data.append(seg)
-                    self.labels.append(-1)
-                    if max_samples and len(self.data) >= max_samples:
-                        break
-            except Exception as e:
-                print(f"  Skip {fp}: {e}")
-        print(f"  → {len(self.data)} epochs")
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        return self.data[idx], self.labels[idx]
-
-
 class UnlabeledWrapper(Dataset):
-    """Strip labels for pre-training."""
+    """Strip labels for self-supervised pre-training."""
     def __init__(self, ds):
         self.ds = ds
     def __len__(self):
@@ -155,6 +109,7 @@ class UnlabeledWrapper(Dataset):
 def cosine_schedule(base, final, total, step):
     return final + 0.5 * (base - final) * (1 + math.cos(math.pi * step / total))
 
+
 def warmup_cosine_lr(base_lr, warmup, total, step):
     if step < warmup:
         return base_lr * step / max(1, warmup)
@@ -167,25 +122,20 @@ class EEGDINOTrainer:
 
     def __init__(self, n_channels=2, sampling_rate=200, embed_dim=64,
                  n_layers=2, n_heads=4, mlp_dim=128, out_dim=4096,
-                 head_hidden_dim=2048, head_bottleneck_dim=256,
+                 head_hidden_dim=256, head_bottleneck_dim=64,
                  n_local_views=4, n_masked_views=1, batch_size=64,
                  learning_rate=1.25e-4, weight_decay_start=0.04,
                  weight_decay_end=0.40, momentum_start=0.996,
                  momentum_end=1.0, warmup_epochs=10, n_epochs=100,
                  device='cuda'):
 
-        self.device = device
+        self.device = 'cuda:0' if (device != 'cpu' and torch.cuda.is_available()) else 'cpu'
         self.batch_size = batch_size
         self.base_lr = learning_rate
         self.wd_start, self.wd_end = weight_decay_start, weight_decay_end
         self.mom_start, self.mom_end = momentum_start, momentum_end
         self.warmup_epochs = warmup_epochs
         self.n_epochs = n_epochs
-
-        if device == 'cpu' or not torch.cuda.is_available():
-            self.device = 'cpu'
-        else:
-            self.device = 'cuda:0'
 
         self.student = StudentModel(
             n_channels, sampling_rate, embed_dim,
@@ -200,18 +150,15 @@ class EEGDINOTrainer:
         self.patch_loss_fn = PatchLoss().to(self.device)
 
         self.optimizer = torch.optim.AdamW(
-            self._raw().parameters(), lr=learning_rate,
+            self.student.parameters(), lr=learning_rate,
             weight_decay=weight_decay_start)
 
         self.total_steps = None
         self.step = 0
         self.momentum = momentum_start
 
-        n_p = sum(p.numel() for p in self._raw().parameters())
+        n_p = sum(p.numel() for p in self.student.parameters())
         print(f"Model: {n_p/1e6:.2f}M params | device: {self.device}")
-
-    def _raw(self):
-        return self.student.module if isinstance(self.student, nn.DataParallel) else self.student
 
     @staticmethod
     def _expand_ci(ci, B):
@@ -231,7 +178,7 @@ class EEGDINOTrainer:
     @torch.no_grad()
     def _ema_update(self):
         m = self.momentum
-        for ps, pt in zip(self._raw().parameters(), self.teacher.model.parameters()):
+        for ps, pt in zip(self.student.parameters(), self.teacher.model.parameters()):
             pt.data.mul_(m).add_(ps.data, alpha=1 - m)
 
     def _forward(self, x):
@@ -263,7 +210,7 @@ class EEGDINOTrainer:
         tot, sig_t, pat_t = 0., 0., 0.
         diag = {'s_std': 0., 't_std': 0., 'c_norm': 0., 'grad_norm': 0.}
 
-        for i, x in enumerate(loader):
+        for x in loader:
             if isinstance(x, (list, tuple)):
                 x = x[0]
             self._update_schedules()
@@ -276,7 +223,7 @@ class EEGDINOTrainer:
 
             self.optimizer.zero_grad()
             loss.backward()
-            gn = torch.nn.utils.clip_grad_norm_(self._raw().parameters(), 3.0)
+            gn = torch.nn.utils.clip_grad_norm_(self.student.parameters(), 3.0)
             self.optimizer.step()
             self._ema_update()
 
@@ -284,11 +231,9 @@ class EEGDINOTrainer:
                 tg = torch.cat([t_out['global_0'], t_out['global_1']])
                 self.teacher.update_center(tg)
 
-                # Diagnostics
                 s_cat = torch.cat([v for v in s_out.values()])
-                t_cat = tg
                 diag['s_std'] += s_cat.std(dim=0).mean().item()
-                diag['t_std'] += t_cat.std(dim=0).mean().item()
+                diag['t_std'] += tg.std(dim=0).mean().item()
                 diag['c_norm'] += self.teacher.center.norm().item()
                 diag['grad_norm'] += gn.item() if isinstance(gn, torch.Tensor) else gn
 
@@ -323,7 +268,7 @@ class EEGDINOTrainer:
     def _checkpoint(self, epoch, metrics):
         return {
             'epoch': epoch,
-            'student': self._raw().state_dict(),
+            'student': self.student.state_dict(),
             'teacher': self.teacher.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'step': self.step,
@@ -335,14 +280,13 @@ class EEGDINOTrainer:
         spe = len(train_loader)
         self.total_steps = spe * self.n_epochs
         self.step = 0
-        self.momentum = self.mom_start
 
         print(f"\nEpochs: {self.n_epochs} | Steps/epoch: {spe} | "
               f"Total: {self.total_steps} | LR: {self.base_lr} | BS: {self.batch_size}")
 
-        collapse_threshold = math.log(self.signal_loss_fn.out_dim if hasattr(self.signal_loss_fn, 'out_dim') else 4096)
-
+        collapse_threshold = math.log(self.signal_loss_fn.out_dim)
         best = float('inf')
+
         for epoch in range(1, self.n_epochs + 1):
             tr = self._train_epoch(train_loader, epoch)
             d = tr['diag']
@@ -355,7 +299,6 @@ class EEGDINOTrainer:
             print(f"        | s_std:{d['s_std']:.6f} t_std:{d['t_std']:.6f}"
                   f" c_norm:{d['c_norm']:.4f} grad:{d['grad_norm']:.4f}")
 
-            # Collapse warning
             if tr['signal'] > 0.95 * collapse_threshold:
                 print(f"  ⚠ COLLAPSE WARNING: sig_loss={tr['signal']:.4f} ~ {collapse_threshold:.2f} (uniform)")
             if d['s_std'] < 1e-4:
@@ -380,105 +323,35 @@ class EEGDINOTrainer:
         print(f"\nDone! Best loss: {best:.4f} → {save_dir}/")
 
 
-# ── Presets ──────────────────────────────────────────────────────────────────
-# Head dims scale as 4×embed_dim (hidden) and embed_dim (bottleneck) to keep
-# a healthy backbone-to-head ratio.  DINO paper uses 2048/256 for ViT-S/B
-# (22–86M backbone); we scale proportionally for smaller backbones.
-# LR follows DINO scaling: base_lr (5e-4) × batch_size / 256.
-
-PRESETS = {
-    'tiny': dict(
-        embed_dim=64, n_layers=2, n_heads=4, mlp_dim=128,
-        out_dim=4096, head_hidden_dim=256, head_bottleneck_dim=64,
-        n_local_views=4, n_masked_views=1, batch_size=64,
-        learning_rate=1.25e-4,   # 5e-4 × 64/256
-        warmup_epochs=10,
-        weight_decay_start=0.04, weight_decay_end=0.40,
-    ),
-    'small': dict(
-        embed_dim=128, n_layers=4, n_heads=4, mlp_dim=256,
-        out_dim=4096, head_hidden_dim=512, head_bottleneck_dim=128,
-        n_local_views=6, n_masked_views=2, batch_size=64,
-        learning_rate=1.25e-4,   # 5e-4 × 64/256
-        warmup_epochs=10,
-        weight_decay_start=0.04, weight_decay_end=0.40,
-    ),
-    'base': dict(
-        embed_dim=200, n_layers=12, n_heads=8, mlp_dim=512,
-        out_dim=4096, head_hidden_dim=800, head_bottleneck_dim=256,
-        n_local_views=8, n_masked_views=2, batch_size=256,
-        learning_rate=5e-4,      # 5e-4 × 256/256
-        warmup_epochs=10,
-        weight_decay_start=0.04, weight_decay_end=0.40,
-    ),
-}
-
-
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def main():
     p = argparse.ArgumentParser(description='EEG-DINO Pre-Training')
-    p.add_argument('--preset', default='tiny', choices=PRESETS)
-    p.add_argument('--dataset', default='sleep', choices=['sleep', 'bci', 'both'])
-    p.add_argument('--n_channels', type=int, default=2)
-    p.add_argument('--max_train', type=int, default=None)
-    p.add_argument('--max_val', type=int, default=None)
+    p.add_argument('--max_train', type=int, default=None, help='Limit training samples')
+    p.add_argument('--max_val', type=int, default=None, help='Limit validation samples')
     p.add_argument('--n_epochs', type=int, default=None)
     p.add_argument('--batch_size', type=int, default=None)
     p.add_argument('--lr', type=float, default=None)
-    p.add_argument('--head_hidden_dim', type=int, default=None,
-                   help='DINOHead width (paper=2048, lighter=512)')
-    p.add_argument('--head_bottleneck_dim', type=int, default=None,
-                   help='DINOHead bottleneck (paper=256)')
-    p.add_argument('--out_dim', type=int, default=None,
-                   help='Number of prototypes (paper=4096 or 65536)')
     p.add_argument('--save_dir', default='checkpoints')
+    p.add_argument('--preset', default='tiny', choices=['tiny'])  # for evaluate.py compat
     args = p.parse_args()
 
-    cfg = {
-        'n_channels': args.n_channels,
-        'sampling_rate': 200,
-        'momentum_start': 0.996,
-        'momentum_end': 1.0,
-        'n_epochs': 100,
-        'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-        **PRESETS[args.preset],
-    }
-    if args.n_epochs:  cfg['n_epochs'] = args.n_epochs
-    if args.batch_size:
-        cfg['batch_size'] = args.batch_size
-        # DINO LR scaling: re-compute when batch_size changes
-        if not args.lr:
-            cfg['learning_rate'] = 5e-4 * args.batch_size / 256
-    if args.lr:              cfg['learning_rate'] = args.lr
-    if args.head_hidden_dim: cfg['head_hidden_dim'] = args.head_hidden_dim
-    if args.head_bottleneck_dim: cfg['head_bottleneck_dim'] = args.head_bottleneck_dim
-    if args.out_dim:         cfg['out_dim'] = args.out_dim
+    cfg = {**CONFIG, 'device': 'cuda' if torch.cuda.is_available() else 'cpu'}
+    if args.n_epochs:    cfg['n_epochs'] = args.n_epochs
+    if args.batch_size:  cfg['batch_size'] = args.batch_size
+    if args.lr:          cfg['learning_rate'] = args.lr
 
-    print(f"EEG-DINO | preset={args.preset} | dataset={args.dataset}")
+    print("EEG-DINO | Sleep-EDF | tiny")
     for k, v in sorted(cfg.items()):
         print(f"  {k}: {v}")
 
     # Load data
-    tr_parts, va_parts = [], []
-    if args.dataset in ('sleep', 'both'):
-        tr_parts.append(SleepEDFDataset(
-            SLEEP_EDF_PATH, 'TrainFold', cfg['n_channels'],
-            cfg['sampling_rate'], args.max_train))
-        va_parts.append(SleepEDFDataset(
-            SLEEP_EDF_PATH, 'ValidFold', cfg['n_channels'],
-            cfg['sampling_rate'], args.max_val))
-
-    if args.dataset in ('bci', 'both'):
-        tr_parts.append(BCIDataset(
-            BCI_PATH, 'train', cfg['n_channels'],
-            cfg['sampling_rate'], max_samples=args.max_train))
-        va_parts.append(BCIDataset(
-            BCI_PATH, 'val', cfg['n_channels'],
-            cfg['sampling_rate'], max_samples=args.max_val))
-
-    tr_ds = UnlabeledWrapper(ConcatDataset(tr_parts) if len(tr_parts) > 1 else tr_parts[0])
-    va_ds = UnlabeledWrapper(ConcatDataset(va_parts) if len(va_parts) > 1 else va_parts[0])
+    tr_ds = UnlabeledWrapper(SleepEDFDataset(
+        SLEEP_EDF_PATH, 'TrainFold', cfg['n_channels'],
+        cfg['sampling_rate'], args.max_train))
+    va_ds = UnlabeledWrapper(SleepEDFDataset(
+        SLEEP_EDF_PATH, 'ValidFold', cfg['n_channels'],
+        cfg['sampling_rate'], args.max_val))
     print(f"Train: {len(tr_ds)} | Val: {len(va_ds)}")
 
     cuda = cfg['device'] != 'cpu'
