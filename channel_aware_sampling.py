@@ -1,9 +1,21 @@
-"""Channel-Aware Sampling — creates multi-scale views for DINO."""
+"""Channel-Aware Sampling — paper-faithful multi-scale view generation.
+
+Global views: ~70% of channels (ceil), 80% temporal window.
+Local views:  ~30% of channels (floor), 50% temporal window.
+Masked views: global crop + 20% channel/temporal patch masking.
+
+For global views, ceil() is used for channel count to maintain the paper's
+intended asymmetry (global >> local information) with small channel counts.
+With C=2: global=2ch (100%), local=1ch (50%) — ratio 2×.
+With C=19: global=14ch (74%), local=5ch (26%) — ratio 2.8× (paper: 2.6×).
+"""
+import math
 import torch
 import numpy as np
 
 
 class ChannelAwareSampling:
+
     def __init__(self, n_channels=2, sampling_rate=200,
                  n_local_views=4, n_masked_views=1):
         self.n_channels = n_channels
@@ -11,26 +23,34 @@ class ChannelAwareSampling:
         self.n_local_views = n_local_views
         self.n_masked_views = n_masked_views
 
-    def _random_crop(self, x, ch_frac, time_frac):
-        """Select ch_frac channels and time_frac temporal window."""
+    def _random_crop(self, x, ch_frac, time_frac, ceil_ch=False):
+        """Select ch_frac of channels and time_frac temporal window.
+        If ceil_ch, round up channel count (used for global views)."""
         B, C, T = x.shape
-        n_ch = max(1, int(ch_frac * min(C, self.n_channels)))
         n_t = int(time_frac * T)
-        ch_idx = np.sort(np.random.choice(min(C, self.n_channels), n_ch, replace=False))
         t_start = np.random.randint(0, T - n_t + 1)
+
+        C_eff = min(C, self.n_channels)
+        if ceil_ch:
+            n_ch = max(1, math.ceil(ch_frac * C_eff))
+        else:
+            n_ch = max(1, int(ch_frac * C_eff))
+        n_ch = min(n_ch, C_eff)
+        ch_idx = np.sort(np.random.choice(C_eff, n_ch, replace=False))
+
         return x[:, ch_idx, t_start:t_start + n_t], torch.LongTensor(ch_idx)
 
     def create_global_view(self, x):
-        return self._random_crop(x, 0.7, 0.8)
+        return self._random_crop(x, 0.7, 0.8, ceil_ch=True)
 
     def create_local_view(self, x):
-        return self._random_crop(x, 0.3, 0.5)
+        return self._random_crop(x, 0.3, 0.5, ceil_ch=False)
 
     def create_masked_view(self, x):
         view, ch_idx = self.create_global_view(x)
         _, C, T = view.shape
 
-        # Channel masking (20%), skip if only 1 channel
+        # Channel masking (20%) — only when >1 channel present
         if C > 1:
             n_mask = max(1, int(0.2 * C))
             view[:, np.random.choice(C, n_mask, replace=False), :] = 0
@@ -38,7 +58,8 @@ class ChannelAwareSampling:
         # Temporal patch masking (20% of 1-second patches)
         ps = self.sampling_rate
         n_patches = T // ps
-        for p in np.random.choice(n_patches, max(1, int(0.2 * n_patches)), replace=False):
+        n_mask_t = max(1, int(0.2 * n_patches))
+        for p in np.random.choice(n_patches, n_mask_t, replace=False):
             view[:, :, p * ps:(p + 1) * ps] = 0
 
         return view, ch_idx

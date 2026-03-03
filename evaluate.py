@@ -38,8 +38,8 @@ class FrozenBackbone(nn.Module):
             channel_indices = channel_indices.unsqueeze(0).expand(x.shape[0], -1)
         tokens = self.tfe(x)
         tokens = self.dpe(tokens, channel_indices)
-        tokens = self.transformer(tokens)
-        return tokens[:, 0]  # CLS token
+        cls, patches = self.transformer(tokens)
+        return cls
 
 
 class LinearProbe(nn.Module):

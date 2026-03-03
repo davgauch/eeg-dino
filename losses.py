@@ -1,13 +1,23 @@
-"""Hierarchical Self-Distillation Losses for EEG-DINO."""
+"""Hierarchical Self-Distillation Losses for EEG-DINO.
+
+Signal loss follows the exact DINO formulation: for each teacher global
+view t and each student view s (where s ≠ t), compute H(P_t, P_s).
+All terms are averaged with equal weight (not per-group).
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 class DINOLoss(nn.Module):
-    """Signal-level loss: L_global + L_local + L_masked."""
+    """Signal-level DINO loss with paper-faithful per-term normalization.
 
-    def __init__(self, out_dim=64, teacher_temp_base=0.04,
+    For n_local=4, n_masked=1: 12 total cross-view pairs, each weight 1/12.
+    This avoids overweighting the global↔global terms (which are easiest
+    to minimize by collapse since both views are very similar).
+    """
+
+    def __init__(self, out_dim=4096, teacher_temp_base=0.04,
                  teacher_temp_final=0.07, temp_warmup_epochs=30,
                  student_temp=0.1):
         super().__init__()
@@ -19,48 +29,40 @@ class DINOLoss(nn.Module):
         self.teacher_temp = teacher_temp_base
 
     def set_epoch(self, epoch):
-        """Teacher temperature warmup: base → final over warmup epochs."""
-        if epoch < self.temp_warmup_epochs:
+        """Teacher temperature warmup: base → final over warmup epochs.
+        epoch is 1-indexed (first training epoch = 1)."""
+        e = epoch - 1  # 0-indexed for schedule math
+        if e < self.temp_warmup_epochs:
             self.teacher_temp = (self.teacher_temp_base +
                 (self.teacher_temp_final - self.teacher_temp_base)
-                * epoch / self.temp_warmup_epochs)
+                * e / self.temp_warmup_epochs)
         else:
             self.teacher_temp = self.teacher_temp_final
 
     def forward(self, student_outputs, teacher_outputs, teacher_center):
-        # Teacher: centered softmax; Student: log-softmax
+        # Teacher: centered + sharpened probabilities
         t_probs = {}
         for k, v in teacher_outputs.items():
             t_probs[k] = F.softmax((v - teacher_center) / self.teacher_temp, dim=-1)
 
+        # Student: log-softmax probabilities
         s_probs = {}
         for k, v in student_outputs.items():
             s_probs[k] = F.log_softmax(v / self.student_temp, dim=-1)
 
-        def _ce(t_key, s_key):
-            return -torch.sum(t_probs[t_key] * s_probs[s_key], dim=-1).mean()
+        # DINO loss: equal weight per (teacher, student) pair, skip self
+        total_loss = 0.0
+        n_terms = 0
+        for t_key in sorted(t_probs.keys()):       # global_0, global_1
+            for s_key in sorted(s_probs.keys()):    # all views
+                if s_key == t_key:
+                    continue  # skip self-distillation
+                total_loss += -torch.sum(t_probs[t_key] * s_probs[s_key],
+                                         dim=-1).mean()
+                n_terms += 1
 
-        # Global cross-view
-        loss_global = (_ce('global_0', 'global_1') + _ce('global_1', 'global_0')) / 2
-
-        # Local → global
-        local_keys = sorted(k for k in s_probs if k.startswith('local_'))
-        loss_local = sum(_ce(tk, sk) for sk in local_keys
-                         for tk in ['global_0', 'global_1'])
-        loss_local = loss_local / max(1, len(local_keys) * 2)
-
-        # Masked → global
-        masked_keys = sorted(k for k in s_probs if k.startswith('masked_'))
-        loss_masked = sum(_ce(tk, sk) for sk in masked_keys
-                          for tk in ['global_0', 'global_1'])
-        loss_masked = loss_masked / max(1, len(masked_keys) * 2)
-
-        loss_signal = loss_global + loss_local + loss_masked
-        return loss_signal, {
-            'global': loss_global.item(),
-            'local': loss_local.item(),
-            'masked': loss_masked.item(),
-        }
+        loss_signal = total_loss / max(1, n_terms)
+        return loss_signal, {'n_terms': n_terms}
 
 
 class PatchLoss(nn.Module):
@@ -76,10 +78,11 @@ class PatchLoss(nn.Module):
         self.teacher_temp = teacher_temp_base
 
     def set_epoch(self, epoch):
-        if epoch < self.temp_warmup_epochs:
+        e = epoch - 1
+        if e < self.temp_warmup_epochs:
             self.teacher_temp = (self.teacher_temp_base +
                 (self.teacher_temp_final - self.teacher_temp_base)
-                * epoch / self.temp_warmup_epochs)
+                * e / self.temp_warmup_epochs)
         else:
             self.teacher_temp = self.teacher_temp_final
 

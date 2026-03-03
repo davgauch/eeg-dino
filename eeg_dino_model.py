@@ -1,4 +1,10 @@
-"""EEG-DINO Model — Student/Teacher with DINO heads."""
+"""EEG-DINO Model — Student/Teacher with DINO projection heads.
+
+Head architecture follows DINO/DINOv2:
+  hidden_dim=2048, bottleneck_dim=256, out_dim=4096.
+  These are FIXED across backbone sizes (the head is discarded after
+  pre-training; only the backbone is kept for downstream tasks).
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,20 +13,38 @@ from dpe_module import DecoupledPositionalEmbedding
 
 
 class DINOHead(nn.Module):
-    """MLP → L2-norm → weight-normalized projection (anti-collapse)."""
+    """DINO projection head (paper-faithful).
 
-    def __init__(self, in_dim, hidden_dim, out_dim=64):
+    Architecture:
+        Linear(in_dim, hidden_dim) → GELU →
+        Linear(hidden_dim, hidden_dim) → GELU →
+        Linear(hidden_dim, bottleneck_dim) → L2-norm →
+        weight_norm Linear(bottleneck_dim, out_dim)
+
+    Weight init: trunc_normal(std=0.02) as in DINO reference code.
+    """
+
+    def __init__(self, in_dim, hidden_dim=2048, out_dim=4096,
+                 bottleneck_dim=256):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden_dim), nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim), nn.GELU(),
-            nn.Linear(hidden_dim, out_dim),
+            nn.Linear(hidden_dim, bottleneck_dim),
         )
+        self.apply(self._init_weights)
         self.last_layer = nn.utils.weight_norm(
-            nn.Linear(out_dim, out_dim, bias=False)
+            nn.Linear(bottleneck_dim, out_dim, bias=False)
         )
         self.last_layer.weight_g.data.fill_(1)
         self.last_layer.weight_g.requires_grad = False
+
+    @staticmethod
+    def _init_weights(m):
+        if isinstance(m, nn.Linear):
+            nn.init.trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
         x = self.mlp(x)
@@ -52,18 +76,26 @@ class EEGTransformer(nn.Module):
 class StudentModel(nn.Module):
     """
     Full student: TFE → DPE → Transformer → signal/patch heads.
-    Handles channel_indices as 1D or 2D (DataParallel).
+
+    head_hidden_dim and head_bottleneck_dim control the DINO projection
+    heads and are independent of the backbone's mlp_dim/embed_dim.
+    Paper defaults: hidden_dim=2048, bottleneck_dim=256.
     """
 
     def __init__(self, n_channels=2, sampling_rate=200, embed_dim=64,
-                 n_layers=2, n_heads=4, mlp_dim=128, out_dim=64):
+                 n_layers=2, n_heads=4, mlp_dim=128, out_dim=4096,
+                 head_hidden_dim=2048, head_bottleneck_dim=256):
         super().__init__()
         self.out_dim = out_dim
+        self.head_hidden_dim = head_hidden_dim
+        self.head_bottleneck_dim = head_bottleneck_dim
         self.tfe = TimeFrequencyEmbedding(n_channels, sampling_rate, embed_dim)
         self.dpe = DecoupledPositionalEmbedding(n_channels, embed_dim)
         self.transformer = EEGTransformer(embed_dim, n_layers, n_heads, mlp_dim)
-        self.signal_head = DINOHead(embed_dim, mlp_dim, out_dim)
-        self.patch_head = DINOHead(embed_dim, mlp_dim, out_dim)
+        self.signal_head = DINOHead(embed_dim, head_hidden_dim, out_dim,
+                                    head_bottleneck_dim)
+        self.patch_head = DINOHead(embed_dim, head_hidden_dim, out_dim,
+                                   head_bottleneck_dim)
 
     @staticmethod
     def _resolve_ci(ci):
@@ -104,8 +136,10 @@ class TeacherModel(nn.Module):
             embed_dim=student.transformer.cls_token.shape[-1],
             n_layers=len(student.transformer.transformer.layers),
             n_heads=student.transformer.transformer.layers[0].self_attn.num_heads,
-            mlp_dim=student.signal_head.mlp[0].out_features,
+            mlp_dim=student.transformer.transformer.layers[0].linear1.out_features,
             out_dim=student.out_dim,
+            head_hidden_dim=student.head_hidden_dim,
+            head_bottleneck_dim=student.head_bottleneck_dim,
         )
         self.model.load_state_dict(student.state_dict())
         for p in self.parameters():

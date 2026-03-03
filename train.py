@@ -166,11 +166,12 @@ def warmup_cosine_lr(base_lr, warmup, total, step):
 class EEGDINOTrainer:
 
     def __init__(self, n_channels=2, sampling_rate=200, embed_dim=64,
-                 n_layers=2, n_heads=4, mlp_dim=128, out_dim=64,
+                 n_layers=2, n_heads=4, mlp_dim=128, out_dim=4096,
+                 head_hidden_dim=2048, head_bottleneck_dim=256,
                  n_local_views=4, n_masked_views=1, batch_size=64,
-                 learning_rate=5e-4, weight_decay_start=0.04,
-                 weight_decay_end=0.20, momentum_start=0.996,
-                 momentum_end=1.0, warmup_epochs=5, n_epochs=100,
+                 learning_rate=1.25e-4, weight_decay_start=0.04,
+                 weight_decay_end=0.40, momentum_start=0.996,
+                 momentum_end=1.0, warmup_epochs=10, n_epochs=100,
                  device='cuda'):
 
         self.device = device
@@ -181,8 +182,6 @@ class EEGDINOTrainer:
         self.warmup_epochs = warmup_epochs
         self.n_epochs = n_epochs
 
-        # Resolve device — single GPU by default, safe multi-GPU only
-        # via CUDA_VISIBLE_DEVICES=0,1 (set before launching)
         if device == 'cpu' or not torch.cuda.is_available():
             self.device = 'cpu'
         else:
@@ -190,7 +189,8 @@ class EEGDINOTrainer:
 
         self.student = StudentModel(
             n_channels, sampling_rate, embed_dim,
-            n_layers, n_heads, mlp_dim, out_dim
+            n_layers, n_heads, mlp_dim, out_dim,
+            head_hidden_dim, head_bottleneck_dim
         ).to(self.device)
         self.teacher = TeacherModel(self.student).to(self.device)
 
@@ -340,7 +340,7 @@ class EEGDINOTrainer:
         print(f"\nEpochs: {self.n_epochs} | Steps/epoch: {spe} | "
               f"Total: {self.total_steps} | LR: {self.base_lr} | BS: {self.batch_size}")
 
-        collapse_threshold = 3 * math.log(self.signal_loss_fn.out_dim if hasattr(self.signal_loss_fn, 'out_dim') else 256)
+        collapse_threshold = math.log(self.signal_loss_fn.out_dim if hasattr(self.signal_loss_fn, 'out_dim') else 4096)
 
         best = float('inf')
         for epoch in range(1, self.n_epochs + 1):
@@ -382,23 +382,35 @@ class EEGDINOTrainer:
 
 # ── Presets ──────────────────────────────────────────────────────────────────
 
+# ── Presets ──────────────────────────────────────────────────────────────────
+# Backbone scales across presets; DINO head is FIXED at paper values
+# (hidden_dim=2048, bottleneck_dim=256, out_dim=4096) for all sizes.
+# The head is discarded after pre-training — only backbone matters downstream.
+# LR follows DINO scaling: base_lr (5e-4) × batch_size / 256.
+
 PRESETS = {
     'tiny': dict(
-        embed_dim=64, n_layers=2, n_heads=4, mlp_dim=128, out_dim=256,
+        embed_dim=64, n_layers=2, n_heads=4, mlp_dim=128,
+        out_dim=4096, head_hidden_dim=2048, head_bottleneck_dim=256,
         n_local_views=4, n_masked_views=1, batch_size=64,
-        learning_rate=5e-4, warmup_epochs=5,
-        weight_decay_start=0.04, weight_decay_end=0.20,
+        learning_rate=1.25e-4,   # 5e-4 × 64/256
+        warmup_epochs=10,
+        weight_decay_start=0.04, weight_decay_end=0.40,
     ),
     'small': dict(
-        embed_dim=128, n_layers=4, n_heads=4, mlp_dim=256, out_dim=256,
+        embed_dim=128, n_layers=4, n_heads=4, mlp_dim=256,
+        out_dim=4096, head_hidden_dim=2048, head_bottleneck_dim=256,
         n_local_views=6, n_masked_views=2, batch_size=64,
-        learning_rate=3e-4, warmup_epochs=5,
-        weight_decay_start=0.04, weight_decay_end=0.30,
+        learning_rate=1.25e-4,   # 5e-4 × 64/256
+        warmup_epochs=10,
+        weight_decay_start=0.04, weight_decay_end=0.40,
     ),
     'base': dict(
-        embed_dim=200, n_layers=12, n_heads=8, mlp_dim=512, out_dim=256,
+        embed_dim=200, n_layers=12, n_heads=8, mlp_dim=512,
+        out_dim=4096, head_hidden_dim=2048, head_bottleneck_dim=256,
         n_local_views=8, n_masked_views=2, batch_size=256,
-        learning_rate=1e-4, warmup_epochs=10,
+        learning_rate=5e-4,      # 5e-4 × 256/256
+        warmup_epochs=10,
         weight_decay_start=0.04, weight_decay_end=0.40,
     ),
 }
@@ -416,6 +428,12 @@ def main():
     p.add_argument('--n_epochs', type=int, default=None)
     p.add_argument('--batch_size', type=int, default=None)
     p.add_argument('--lr', type=float, default=None)
+    p.add_argument('--head_hidden_dim', type=int, default=None,
+                   help='DINOHead width (paper=2048, lighter=512)')
+    p.add_argument('--head_bottleneck_dim', type=int, default=None,
+                   help='DINOHead bottleneck (paper=256)')
+    p.add_argument('--out_dim', type=int, default=None,
+                   help='Number of prototypes (paper=4096 or 65536)')
     p.add_argument('--save_dir', default='checkpoints')
     args = p.parse_args()
 
@@ -429,8 +447,15 @@ def main():
         **PRESETS[args.preset],
     }
     if args.n_epochs:  cfg['n_epochs'] = args.n_epochs
-    if args.batch_size: cfg['batch_size'] = args.batch_size
-    if args.lr:        cfg['learning_rate'] = args.lr
+    if args.batch_size:
+        cfg['batch_size'] = args.batch_size
+        # DINO LR scaling: re-compute when batch_size changes
+        if not args.lr:
+            cfg['learning_rate'] = 5e-4 * args.batch_size / 256
+    if args.lr:              cfg['learning_rate'] = args.lr
+    if args.head_hidden_dim: cfg['head_hidden_dim'] = args.head_hidden_dim
+    if args.head_bottleneck_dim: cfg['head_bottleneck_dim'] = args.head_bottleneck_dim
+    if args.out_dim:         cfg['out_dim'] = args.out_dim
 
     print(f"EEG-DINO | preset={args.preset} | dataset={args.dataset}")
     for k, v in sorted(cfg.items()):
