@@ -261,9 +261,9 @@ class EEGDINOTrainer:
         self.signal_loss_fn.set_epoch(epoch)
         self.patch_loss_fn.set_epoch(epoch)
         tot, sig_t, pat_t = 0., 0., 0.
-        pbar = tqdm(loader, desc=f"Epoch {epoch}")
+        diag = {'s_std': 0., 't_std': 0., 'c_norm': 0., 'grad_norm': 0.}
 
-        for x in pbar:
+        for i, x in enumerate(loader):
             if isinstance(x, (list, tuple)):
                 x = x[0]
             self._update_schedules()
@@ -276,7 +276,7 @@ class EEGDINOTrainer:
 
             self.optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self._raw().parameters(), 3.0)
+            gn = torch.nn.utils.clip_grad_norm_(self._raw().parameters(), 3.0)
             self.optimizer.step()
             self._ema_update()
 
@@ -284,15 +284,22 @@ class EEGDINOTrainer:
                 tg = torch.cat([t_out['global_0'], t_out['global_1']])
                 self.teacher.update_center(tg)
 
+                # Diagnostics
+                s_cat = torch.cat([v for v in s_out.values()])
+                t_cat = tg
+                diag['s_std'] += s_cat.std(dim=0).mean().item()
+                diag['t_std'] += t_cat.std(dim=0).mean().item()
+                diag['c_norm'] += self.teacher.center.norm().item()
+                diag['grad_norm'] += gn.item() if isinstance(gn, torch.Tensor) else gn
+
             tot += loss.item()
             sig_t += l_sig.item()
             pat_t += l_pat.item()
-            pbar.set_postfix(loss=f'{loss.item():.3f}',
-                             sig=f'{l_sig.item():.3f}',
-                             pat=f'{l_pat.item():.3f}')
 
         n = len(loader)
-        return {'loss': tot/n, 'signal': sig_t/n, 'patch': pat_t/n}
+        for k in diag:
+            diag[k] /= n
+        return {'loss': tot/n, 'signal': sig_t/n, 'patch': pat_t/n, 'diag': diag}
 
     @torch.no_grad()
     def _val_epoch(self, loader):
@@ -300,7 +307,7 @@ class EEGDINOTrainer:
         self.teacher.eval()
         tot, sig_t, pat_t = 0., 0., 0.
 
-        for x in tqdm(loader, desc="  Val", leave=False):
+        for x in loader:
             if isinstance(x, (list, tuple)):
                 x = x[0]
             s_out, t_out, s_pat, t_pat = self._forward(x)
@@ -333,27 +340,38 @@ class EEGDINOTrainer:
         print(f"\nEpochs: {self.n_epochs} | Steps/epoch: {spe} | "
               f"Total: {self.total_steps} | LR: {self.base_lr} | BS: {self.batch_size}")
 
+        collapse_threshold = 3 * math.log(self.signal_loss_fn.out_dim if hasattr(self.signal_loss_fn, 'out_dim') else 256)
+
         best = float('inf')
         for epoch in range(1, self.n_epochs + 1):
             tr = self._train_epoch(train_loader, epoch)
+            d = tr['diag']
             lr = self.optimizer.param_groups[0]['lr']
             wd = self.optimizer.param_groups[0]['weight_decay']
             t_temp = self.signal_loss_fn.teacher_temp
-            print(f"  Train — loss:{tr['loss']:.4f} sig:{tr['signal']:.4f} "
-                  f"pat:{tr['patch']:.4f} | lr:{lr:.2e} wd:{wd:.3f} mom:{self.momentum:.5f} t_temp:{t_temp:.4f}")
+
+            print(f"Ep {epoch:3d} | loss:{tr['loss']:.4f} sig:{tr['signal']:.4f} pat:{tr['patch']:.4f}"
+                  f" | lr:{lr:.2e} wd:{wd:.3f} mom:{self.momentum:.5f} t_temp:{t_temp:.4f}")
+            print(f"        | s_std:{d['s_std']:.6f} t_std:{d['t_std']:.6f}"
+                  f" c_norm:{d['c_norm']:.4f} grad:{d['grad_norm']:.4f}")
+
+            # Collapse warning
+            if tr['signal'] > 0.95 * collapse_threshold:
+                print(f"  ⚠ COLLAPSE WARNING: sig_loss={tr['signal']:.4f} ~ {collapse_threshold:.2f} (uniform)")
+            if d['s_std'] < 1e-4:
+                print(f"  ⚠ STUDENT OUTPUTS COLLAPSED: std={d['s_std']:.8f}")
 
             monitor = tr['loss']
             if val_loader:
                 va = self._val_epoch(val_loader)
-                print(f"  Val   — loss:{va['loss']:.4f} sig:{va['signal']:.4f} "
-                      f"pat:{va['patch']:.4f}")
+                print(f"   Val  | loss:{va['loss']:.4f} sig:{va['signal']:.4f} pat:{va['patch']:.4f}")
                 monitor = va['loss']
 
             if monitor < best:
                 best = monitor
                 torch.save(self._checkpoint(epoch, tr),
                            os.path.join(save_dir, 'best_model.pth'))
-                print(f"  ✓ Best model saved ({best:.4f})")
+                print(f"  ✓ Best ({best:.4f})")
 
             if epoch % 10 == 0:
                 torch.save(self._checkpoint(epoch, tr),

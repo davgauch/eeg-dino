@@ -11,6 +11,7 @@ class DINOLoss(nn.Module):
                  teacher_temp_final=0.07, temp_warmup_epochs=30,
                  student_temp=0.1):
         super().__init__()
+        self.out_dim = out_dim
         self.teacher_temp_base = teacher_temp_base
         self.teacher_temp_final = teacher_temp_final
         self.temp_warmup_epochs = temp_warmup_epochs
