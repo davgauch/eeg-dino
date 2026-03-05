@@ -318,8 +318,8 @@ def main():
     p.add_argument('--lr', type=float, default=None)
     p.add_argument('--save_dir', default='checkpoints')
     p.add_argument('--mask_strategy', default=None,
-                   choices=['alpha','theta','delta','beta','gamma','random','none'],
-                   help='Frequency masking strategy for masked views')
+                   help='Frequency masking: band name (alpha), combine with + '
+                        '(alpha+beta), or random/none/all')
     p.add_argument('--preset', default='tiny', choices=['tiny'])  # for evaluate.py compat
     args = p.parse_args()
 

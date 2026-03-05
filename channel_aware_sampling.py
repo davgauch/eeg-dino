@@ -17,6 +17,31 @@ BAND_RANGES = {
     'gamma': (30, 50),
 }
 
+ALL_BANDS = list(BAND_RANGES.keys())
+
+
+def parse_mask_strategy(strategy: str):
+    """Parse a mask strategy string into a list of band names.
+
+    Examples:
+        'alpha'          → ['alpha']
+        'alpha+beta'     → ['alpha', 'beta']
+        'all'            → ['delta', 'theta', 'alpha', 'beta', 'gamma']
+        'random'         → 'random'
+        'none'           → 'none'
+    """
+    if strategy in ('none', 'random'):
+        return strategy
+    bands = [b.strip() for b in strategy.split('+')]
+    if bands == ['all']:
+        return ALL_BANDS
+    for b in bands:
+        if b not in BAND_RANGES:
+            raise ValueError(
+                f"Unknown band '{b}'. Choose from {ALL_BANDS} "
+                f"or combine with '+' (e.g. 'alpha+beta'), or use 'random'/'none'/'all'.")
+    return bands
+
 
 class ChannelAwareSampling:
 
@@ -27,7 +52,8 @@ class ChannelAwareSampling:
         self.sampling_rate = sampling_rate
         self.n_local_views = n_local_views
         self.n_masked_views = n_masked_views
-        self.mask_strategy = mask_strategy
+        self.mask_strategy_raw = mask_strategy
+        self.mask_strategy = parse_mask_strategy(mask_strategy)
 
     def _random_crop(self, x, ch_frac, time_frac, ceil_ch=False):
         B, C, T = x.shape
@@ -63,11 +89,14 @@ class ChannelAwareSampling:
 
     def create_masked_view(self, x):
         view, ch_idx = self.create_global_view(x)
-        if self.mask_strategy in BAND_RANGES:
-            low, high = BAND_RANGES[self.mask_strategy]
-            view = self._bandstop(view, low, high)
+        if isinstance(self.mask_strategy, list):
+            # Apply bandstop for each selected band
+            for band in self.mask_strategy:
+                low, high = BAND_RANGES[band]
+                view = self._bandstop(view, low, high)
         elif self.mask_strategy == 'random':
             view = self._random_bandstop(view)
+        # 'none' → no filtering
         return view, ch_idx
 
     def __call__(self, x):
