@@ -1,13 +1,4 @@
-"""EEG-DINO Pre-Training on Sleep-EDF.
-
-Usage:
-  python train.py                                        # default tiny config
-  python train.py --n_epochs 200 --save_dir checkpoints  # longer run
-  python train.py --max_train 5000                       # quick test
-
-Server:
-  CUDA_VISIBLE_DEVICES=0 nohup python train.py > train.log 2>&1 &
-"""
+"""EEG-DINO Pre-Training on Sleep-EDF."""
 
 import os, math, argparse
 import torch
@@ -19,13 +10,9 @@ from torch.utils.data import Dataset, DataLoader
 from eeg_dino_model import StudentModel, TeacherModel
 from channel_aware_sampling import ChannelAwareSampling
 from losses import DINOLoss, PatchLoss
+from physiological_masking import PhysiologicalMasker
 
 SLEEP_EDF_PATH = '/net/inltitan2.epfl.ch/scratch2/tzhu/EEGPT/datasets/downstream/sleep_edf/'
-
-# ── Model config ─────────────────────────────────────────────────────────────
-# Tiny backbone adapted for 2-channel Sleep-EDF data.
-# Head dims scaled proportionally (4×embed_dim / embed_dim) instead of
-# paper defaults (2048/256) which caused gradient starvation at this scale.
 
 CONFIG = dict(
     n_channels=2, sampling_rate=200,
@@ -37,16 +24,14 @@ CONFIG = dict(
     weight_decay_start=0.04, weight_decay_end=0.40,
     momentum_start=0.996, momentum_end=1.0,
     n_epochs=100,
+    mask_strategy='alpha',
 )
 
-# Preset dict kept for evaluate.py compatibility
 PRESETS = {'tiny': CONFIG}
 
 
-# ── Dataset ──────────────────────────────────────────────────────────────────
 
 class SleepEDFDataset(Dataset):
-    """Sleep-EDF .pt files — z-scored, resampled 100→200 Hz, 30s epochs."""
 
     def __init__(self, root, fold='TrainFold', n_channels=2,
                  sampling_rate=200, max_samples=None):
@@ -104,7 +89,6 @@ class UnlabeledWrapper(Dataset):
         return self.ds[idx][0]
 
 
-# ── Schedules ────────────────────────────────────────────────────────────────
 
 def cosine_schedule(base, final, total, step):
     return final + 0.5 * (base - final) * (1 + math.cos(math.pi * step / total))
@@ -116,7 +100,6 @@ def warmup_cosine_lr(base_lr, warmup, total, step):
     return base_lr * 0.5 * (1 + math.cos(math.pi * (step - warmup) / (total - warmup)))
 
 
-# ── Trainer ──────────────────────────────────────────────────────────────────
 
 class EEGDINOTrainer:
 
@@ -127,7 +110,7 @@ class EEGDINOTrainer:
                  learning_rate=1.25e-4, weight_decay_start=0.04,
                  weight_decay_end=0.40, momentum_start=0.996,
                  momentum_end=1.0, warmup_epochs=10, n_epochs=100,
-                 device='cuda'):
+                 mask_strategy='alpha', device='cuda'):
 
         self.device = 'cuda:0' if (device != 'cpu' and torch.cuda.is_available()) else 'cpu'
         self.batch_size = batch_size
@@ -152,6 +135,12 @@ class EEGDINOTrainer:
         self.optimizer = torch.optim.AdamW(
             self.student.parameters(), lr=learning_rate,
             weight_decay=weight_decay_start)
+
+        self.mask_strategy = mask_strategy
+        self.physio_masker = PhysiologicalMasker(
+            n_channels=n_channels,
+            n_freq_bins=self.student.tfe.n_freq_bins)
+        print(f"Mask strategy: '{mask_strategy}'")
 
         self.total_steps = None
         self.step = 0
@@ -183,13 +172,21 @@ class EEGDINOTrainer:
 
     def _forward(self, x):
         views = self.sampler(x)
+        x_dev = x.to(self.device)
         s_out, s_pat, t_out, t_pat = {}, {}, {}, {}
 
         for name, v in views.items():
             vt = v['view'].to(self.device)
             ci = self._expand_ci(v['channels'].to(self.device), vt.shape[0])
             if 'masked' in name:
-                sf, pf = self.student(vt, ci, return_patch=True)
+                _, raw_features = self.student.tfe(vt)
+                if self.mask_strategy != 'none':
+                    raw_features, _ = self.physio_masker.apply_strategy(
+                        raw_features, strategy=self.mask_strategy,
+                        raw_signal=x_dev,
+                        sampling_rate=self.student.tfe.sampling_rate)
+                sf, pf = self.student(vt, ci, return_patch=True,
+                                      masked_features=raw_features)
                 s_out[name], s_pat[name] = sf, pf
             else:
                 s_out[name] = self.student(vt, ci, return_patch=False)
@@ -323,7 +320,6 @@ class EEGDINOTrainer:
         print(f"\nDone! Best loss: {best:.4f} → {save_dir}/")
 
 
-# ── CLI ──────────────────────────────────────────────────────────────────────
 
 def main():
     p = argparse.ArgumentParser(description='EEG-DINO Pre-Training')
@@ -333,6 +329,9 @@ def main():
     p.add_argument('--batch_size', type=int, default=None)
     p.add_argument('--lr', type=float, default=None)
     p.add_argument('--save_dir', default='checkpoints')
+    p.add_argument('--mask_strategy', default=None,
+                   choices=['alpha','theta','delta','beta','gamma','iaf','random','none'],
+                   help='Frequency masking strategy for masked views')
     p.add_argument('--preset', default='tiny', choices=['tiny'])  # for evaluate.py compat
     args = p.parse_args()
 
@@ -340,6 +339,7 @@ def main():
     if args.n_epochs:    cfg['n_epochs'] = args.n_epochs
     if args.batch_size:  cfg['batch_size'] = args.batch_size
     if args.lr:          cfg['learning_rate'] = args.lr
+    if args.mask_strategy: cfg['mask_strategy'] = args.mask_strategy
 
     print("EEG-DINO | Sleep-EDF | tiny")
     for k, v in sorted(cfg.items()):

@@ -2,11 +2,8 @@
 
 Global views: ceil(70%) channels, 80% temporal window.
 Local views:  floor(30%) channels, 50% temporal window.
-Masked views: global crop + 20% channel & temporal patch masking.
-
-ceil() for global channels preserves asymmetry with small channel counts:
-  C=2 → global=2ch (100%), local=1ch (50%).
-  C=19 → global=14ch (74%), local=5ch (26%).
+Masked views: same crop as global (clean signal, no random zeroing).
+              Frequency masking is applied separately in the training loop.
 """
 import math
 import torch
@@ -26,12 +23,10 @@ class ChannelAwareSampling:
         B, C, T = x.shape
         n_t = int(time_frac * T)
         t_start = np.random.randint(0, T - n_t + 1)
-
         C_eff = min(C, self.n_channels)
         n_ch = max(1, math.ceil(ch_frac * C_eff) if ceil_ch else int(ch_frac * C_eff))
         n_ch = min(n_ch, C_eff)
         ch_idx = np.sort(np.random.choice(C_eff, n_ch, replace=False))
-
         return x[:, ch_idx, t_start:t_start + n_t], torch.LongTensor(ch_idx)
 
     def create_global_view(self, x):
@@ -41,20 +36,7 @@ class ChannelAwareSampling:
         return self._random_crop(x, 0.3, 0.5, ceil_ch=False)
 
     def create_masked_view(self, x):
-        view, ch_idx = self.create_global_view(x)
-        _, C, T = view.shape
-
-        if C > 1:
-            n_mask = max(1, int(0.2 * C))
-            view[:, np.random.choice(C, n_mask, replace=False), :] = 0
-
-        ps = self.sampling_rate
-        n_patches = T // ps
-        n_mask_t = max(1, int(0.2 * n_patches))
-        for p in np.random.choice(n_patches, n_mask_t, replace=False):
-            view[:, :, p * ps:(p + 1) * ps] = 0
-
-        return view, ch_idx
+        return self.create_global_view(x)
 
     def __call__(self, x):
         views = {}

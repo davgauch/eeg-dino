@@ -32,7 +32,7 @@ class FrozenBackbone(nn.Module):
         if channel_indices is None:
             channel_indices = torch.arange(x.shape[1], device=x.device)
             channel_indices = channel_indices.unsqueeze(0).expand(x.shape[0], -1)
-        tokens = self.tfe(x)
+        tokens, _ = self.tfe(x)  # discard raw_features in eval
         tokens = self.dpe(tokens, channel_indices)
         cls, _ = self.transformer(tokens)
         return cls
