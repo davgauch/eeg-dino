@@ -13,7 +13,7 @@ class DINOLoss(nn.Module):
     """Signal-level DINO loss — cross-entropy over all (teacher, student) pairs."""
 
     def __init__(self, out_dim=4096, teacher_temp_base=0.04,
-                 teacher_temp_final=0.07, temp_warmup_epochs=30,
+                 teacher_temp_final=0.05, temp_warmup_epochs=10,
                  student_temp=0.1):
         super().__init__()
         self.out_dim = out_dim
@@ -53,8 +53,8 @@ class DINOLoss(nn.Module):
 class PatchLoss(nn.Module):
     """Patch-level distillation: masked student patches vs global teacher patches."""
 
-    def __init__(self, teacher_temp_base=0.04, teacher_temp_final=0.07,
-                 temp_warmup_epochs=30, student_temp=0.1):
+    def __init__(self, teacher_temp_base=0.04, teacher_temp_final=0.05,
+                 temp_warmup_epochs=10, student_temp=0.1):
         super().__init__()
         self.teacher_temp_base = teacher_temp_base
         self.teacher_temp_final = teacher_temp_final
