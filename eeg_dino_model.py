@@ -72,8 +72,6 @@ class StudentModel(nn.Module):
         self.transformer = EEGTransformer(embed_dim, n_layers, n_heads, mlp_dim)
         self.signal_head = DINOHead(embed_dim, head_hidden_dim, out_dim, head_bottleneck_dim)
         self.patch_head = DINOHead(embed_dim, head_hidden_dim, out_dim, head_bottleneck_dim)
-        self.mask_projection = nn.Linear(
-            n_channels * self.tfe.n_freq_bins, embed_dim)
 
     @staticmethod
     def _resolve_ci(ci):
@@ -81,8 +79,7 @@ class StudentModel(nn.Module):
             return None
         return ci[0] if ci.dim() == 2 else ci
 
-    def forward(self, x, channel_indices=None, return_patch=False,
-                masked_features=None):
+    def forward(self, x, channel_indices=None, return_patch=False):
         ci = self._resolve_ci(channel_indices)
 
         if ci is not None and x.shape[1] < self.tfe.n_channels:
@@ -92,10 +89,7 @@ class StudentModel(nn.Module):
             full[:, ci, :] = x
             x = full
 
-        if masked_features is not None:
-            tokens = self.mask_projection(masked_features)
-        else:
-            tokens, _ = self.tfe(x)
+        tokens, _ = self.tfe(x)
 
         tokens = self.dpe(tokens, ci)
         cls, patches = self.transformer(tokens)
@@ -132,10 +126,8 @@ class TeacherModel(nn.Module):
         self.center_momentum = 0.9
 
     @torch.no_grad()
-    def forward(self, x, channel_indices=None, return_patch=False,
-                masked_features=None):
-        return self.model(x, channel_indices, return_patch,
-                          masked_features=masked_features)
+    def forward(self, x, channel_indices=None, return_patch=False):
+        return self.model(x, channel_indices, return_patch)
 
     @torch.no_grad()
     def update_center(self, teacher_output):

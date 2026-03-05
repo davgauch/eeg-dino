@@ -2,22 +2,32 @@
 
 Global views: ceil(70%) channels, 80% temporal window.
 Local views:  floor(30%) channels, 50% temporal window.
-Masked views: same crop as global (clean signal, no random zeroing).
-              Frequency masking is applied separately in the training loop.
+Masked views: global crop + bandstop filter on a physiological band.
 """
 import math
 import torch
 import numpy as np
 
 
+BAND_RANGES = {
+    'delta': (1, 4),
+    'theta': (4, 8),
+    'alpha': (8, 13),
+    'beta':  (13, 30),
+    'gamma': (30, 50),
+}
+
+
 class ChannelAwareSampling:
 
     def __init__(self, n_channels=2, sampling_rate=200,
-                 n_local_views=4, n_masked_views=1):
+                 n_local_views=4, n_masked_views=1,
+                 mask_strategy='alpha'):
         self.n_channels = n_channels
         self.sampling_rate = sampling_rate
         self.n_local_views = n_local_views
         self.n_masked_views = n_masked_views
+        self.mask_strategy = mask_strategy
 
     def _random_crop(self, x, ch_frac, time_frac, ceil_ch=False):
         B, C, T = x.shape
@@ -29,6 +39,22 @@ class ChannelAwareSampling:
         ch_idx = np.sort(np.random.choice(C_eff, n_ch, replace=False))
         return x[:, ch_idx, t_start:t_start + n_t], torch.LongTensor(ch_idx)
 
+    def _bandstop(self, x, low_hz, high_hz):
+        """Zero frequency bins in [low_hz, high_hz) via FFT."""
+        spectrum = torch.fft.rfft(x, dim=-1)
+        freqs = torch.fft.rfftfreq(x.shape[-1], d=1.0 / self.sampling_rate)
+        mask = (freqs >= low_hz) & (freqs < high_hz)
+        spectrum[:, :, mask] = 0
+        return torch.fft.irfft(spectrum, n=x.shape[-1], dim=-1)
+
+    def _random_bandstop(self, x, ratio=0.20):
+        """Zero a random 20% of frequency bins via FFT."""
+        spectrum = torch.fft.rfft(x, dim=-1)
+        n_bins = spectrum.shape[-1]
+        mask = torch.rand(n_bins) < ratio
+        spectrum[:, :, mask] = 0
+        return torch.fft.irfft(spectrum, n=x.shape[-1], dim=-1)
+
     def create_global_view(self, x):
         return self._random_crop(x, 0.7, 0.8, ceil_ch=True)
 
@@ -36,7 +62,13 @@ class ChannelAwareSampling:
         return self._random_crop(x, 0.3, 0.5, ceil_ch=False)
 
     def create_masked_view(self, x):
-        return self.create_global_view(x)
+        view, ch_idx = self.create_global_view(x)
+        if self.mask_strategy in BAND_RANGES:
+            low, high = BAND_RANGES[self.mask_strategy]
+            view = self._bandstop(view, low, high)
+        elif self.mask_strategy == 'random':
+            view = self._random_bandstop(view)
+        return view, ch_idx
 
     def __call__(self, x):
         views = {}

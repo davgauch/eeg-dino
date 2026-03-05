@@ -10,7 +10,6 @@ from torch.utils.data import Dataset, DataLoader
 from eeg_dino_model import StudentModel, TeacherModel
 from channel_aware_sampling import ChannelAwareSampling
 from losses import DINOLoss, PatchLoss
-from physiological_masking import PhysiologicalMasker
 
 SLEEP_EDF_PATH = '/net/inltitan2.epfl.ch/scratch2/tzhu/EEGPT/datasets/downstream/sleep_edf/'
 
@@ -128,7 +127,8 @@ class EEGDINOTrainer:
         self.teacher = TeacherModel(self.student).to(self.device)
 
         self.sampler = ChannelAwareSampling(
-            n_channels, sampling_rate, n_local_views, n_masked_views)
+            n_channels, sampling_rate, n_local_views, n_masked_views,
+            mask_strategy=mask_strategy)
         self.signal_loss_fn = DINOLoss(out_dim=out_dim).to(self.device)
         self.patch_loss_fn = PatchLoss().to(self.device)
 
@@ -136,10 +136,6 @@ class EEGDINOTrainer:
             self.student.parameters(), lr=learning_rate,
             weight_decay=weight_decay_start)
 
-        self.mask_strategy = mask_strategy
-        self.physio_masker = PhysiologicalMasker(
-            n_channels=n_channels,
-            n_freq_bins=self.student.tfe.n_freq_bins)
         print(f"Mask strategy: '{mask_strategy}'")
 
         self.total_steps = None
@@ -172,21 +168,13 @@ class EEGDINOTrainer:
 
     def _forward(self, x):
         views = self.sampler(x)
-        x_dev = x.to(self.device)
         s_out, s_pat, t_out, t_pat = {}, {}, {}, {}
 
         for name, v in views.items():
             vt = v['view'].to(self.device)
             ci = self._expand_ci(v['channels'].to(self.device), vt.shape[0])
             if 'masked' in name:
-                _, raw_features = self.student.tfe(vt)
-                if self.mask_strategy != 'none':
-                    raw_features, _ = self.physio_masker.apply_strategy(
-                        raw_features, strategy=self.mask_strategy,
-                        raw_signal=x_dev,
-                        sampling_rate=self.student.tfe.sampling_rate)
-                sf, pf = self.student(vt, ci, return_patch=True,
-                                      masked_features=raw_features)
+                sf, pf = self.student(vt, ci, return_patch=True)
                 s_out[name], s_pat[name] = sf, pf
             else:
                 s_out[name] = self.student(vt, ci, return_patch=False)
@@ -330,7 +318,7 @@ def main():
     p.add_argument('--lr', type=float, default=None)
     p.add_argument('--save_dir', default='checkpoints')
     p.add_argument('--mask_strategy', default=None,
-                   choices=['alpha','theta','delta','beta','gamma','iaf','random','none'],
+                   choices=['alpha','theta','delta','beta','gamma','random','none'],
                    help='Frequency masking strategy for masked views')
     p.add_argument('--preset', default='tiny', choices=['tiny'])  # for evaluate.py compat
     args = p.parse_args()
