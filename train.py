@@ -1,6 +1,6 @@
 """EEG-DINO Pre-Training on Sleep-EDF."""
 
-import os, math, argparse
+import os, math, argparse, random
 import torch
 import torch.nn as nn
 import numpy as np
@@ -320,8 +320,16 @@ def main():
     p.add_argument('--mask_strategy', default=None,
                    help='Frequency masking: band name (alpha), combine with + '
                         '(alpha+beta), or random/none/all')
+    p.add_argument('--seed', type=int, default=42, help='Random seed')
     p.add_argument('--preset', default='tiny', choices=['tiny'])  # for evaluate.py compat
     args = p.parse_args()
+
+    # Reproducibility
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     cfg = {**CONFIG, 'device': 'cuda' if torch.cuda.is_available() else 'cpu'}
     if args.n_epochs:    cfg['n_epochs'] = args.n_epochs
