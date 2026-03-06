@@ -30,7 +30,7 @@ def parse_mask_strategy(strategy: str):
         'random'         → 'random'
         'none'           → 'none'
     """
-    if strategy in ('none', 'random'):
+    if strategy in ('none', 'random', 'spatiotemporal'):
         return strategy
     bands = [b.strip() for b in strategy.split('+')]
     if bands == ['all']:
@@ -39,7 +39,8 @@ def parse_mask_strategy(strategy: str):
         if b not in BAND_RANGES:
             raise ValueError(
                 f"Unknown band '{b}'. Choose from {ALL_BANDS} "
-                f"or combine with '+' (e.g. 'alpha+beta'), or use 'random'/'none'/'all'.")
+                f"or combine with '+' (e.g. 'alpha+beta'), or use "
+                f"'random'/'none'/'spatiotemporal'/'all'.")
     return bands
 
 
@@ -81,6 +82,24 @@ class ChannelAwareSampling:
         spectrum[:, :, mask] = 0
         return torch.fft.irfft(spectrum, n=x.shape[-1], dim=-1)
 
+    def _spatiotemporal_mask(self, view, ch_ratio=0.5, time_patch_ratio=0.15):
+        """Paper-style masking: zero random channels + random temporal patches."""
+        B, C, T = view.shape
+        # Zero random channels
+        n_zero_ch = max(1, int(ch_ratio * C))
+        if n_zero_ch < C:
+            zero_ch = np.random.choice(C, n_zero_ch, replace=False)
+            view = view.clone()
+            view[:, zero_ch, :] = 0
+        # Zero random 1-second temporal patches
+        patch_len = self.sampling_rate  # 1 second = 200 samples
+        n_patches = T // patch_len
+        n_zero_patches = max(1, int(time_patch_ratio * n_patches))
+        zero_patches = np.random.choice(n_patches, n_zero_patches, replace=False)
+        for p in zero_patches:
+            view[:, :, p * patch_len:(p + 1) * patch_len] = 0
+        return view
+
     def create_global_view(self, x):
         return self._random_crop(x, 0.7, 0.8, ceil_ch=True)
 
@@ -90,12 +109,13 @@ class ChannelAwareSampling:
     def create_masked_view(self, x):
         view, ch_idx = self.create_global_view(x)
         if isinstance(self.mask_strategy, list):
-            # Apply bandstop for each selected band
             for band in self.mask_strategy:
                 low, high = BAND_RANGES[band]
                 view = self._bandstop(view, low, high)
         elif self.mask_strategy == 'random':
             view = self._random_bandstop(view)
+        elif self.mask_strategy == 'spatiotemporal':
+            view = self._spatiotemporal_mask(view)
         # 'none' → no filtering
         return view, ch_idx
 
