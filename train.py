@@ -203,7 +203,7 @@ class EEGDINOTrainer:
 
             s_out, t_out, s_pat, t_pat = self._forward(x)
             l_sig, _ = self.signal_loss_fn(s_out, t_out, self.teacher.center)
-            l_pat = self.patch_loss_fn(s_pat, t_pat, self.teacher.center)
+            l_pat = self.patch_loss_fn(s_pat, t_pat, self.teacher.patch_center)
             loss = l_sig + l_pat
 
             self.optimizer.zero_grad()
@@ -215,6 +215,8 @@ class EEGDINOTrainer:
             with torch.no_grad():
                 tg = torch.cat([t_out['global_0'], t_out['global_1']])
                 self.teacher.update_center(tg)
+                tp = torch.cat([t_pat['global_0'], t_pat['global_1']])
+                self.teacher.update_patch_center(tp)
 
                 s_cat = torch.cat([v for v in s_out.values()])
                 diag['s_std'] += s_cat.std(dim=0).mean().item()
@@ -242,7 +244,7 @@ class EEGDINOTrainer:
                 x = x[0]
             s_out, t_out, s_pat, t_pat = self._forward(x)
             l_sig, _ = self.signal_loss_fn(s_out, t_out, self.teacher.center)
-            l_pat = self.patch_loss_fn(s_pat, t_pat, self.teacher.center)
+            l_pat = self.patch_loss_fn(s_pat, t_pat, self.teacher.patch_center)
             tot += (l_sig + l_pat).item()
             sig_t += l_sig.item()
             pat_t += l_pat.item()

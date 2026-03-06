@@ -123,6 +123,7 @@ class TeacherModel(nn.Module):
             p.requires_grad = False
 
         self.register_buffer('center', torch.zeros(1, student.out_dim))
+        self.register_buffer('patch_center', torch.zeros(1, student.out_dim))
         self.center_momentum = 0.9
 
     @torch.no_grad()
@@ -133,3 +134,11 @@ class TeacherModel(nn.Module):
     def update_center(self, teacher_output):
         bc = teacher_output.mean(dim=0, keepdim=True)
         self.center = self.center * self.center_momentum + bc * (1 - self.center_momentum)
+
+    @torch.no_grad()
+    def update_patch_center(self, teacher_patches):
+        """Update patch center from teacher patch tokens [B, T, D] or [N, D]."""
+        if teacher_patches.dim() == 3:
+            teacher_patches = teacher_patches.reshape(-1, teacher_patches.shape[-1])
+        bc = teacher_patches.mean(dim=0, keepdim=True)
+        self.patch_center = self.patch_center * self.center_momentum + bc * (1 - self.center_momentum)
