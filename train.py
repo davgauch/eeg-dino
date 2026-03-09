@@ -388,7 +388,7 @@ def main():
                         '(alpha+beta), or random/none/all')
     p.add_argument('--seed', type=int, default=42, help='Random seed')
     p.add_argument('--dataset', default='sleep_edf',
-                   choices=['sleep_edf', 'bci_2a', 'bci_2b', 'combined'],
+                   choices=['sleep_edf', 'bci_2a', 'bci_2b', 'bci_all', 'combined'],
                    help='Pretraining dataset(s)')
     p.add_argument('--preset', default='tiny', choices=['tiny'])  # for evaluate.py compat
     args = p.parse_args()
@@ -425,6 +425,11 @@ def main():
 
     elif args.dataset == 'bci_2b':
         tr_ds = BCIDataset(BCI_2B_PATH, '2b', nc, sr)
+
+    elif args.dataset == 'bci_all':
+        bci_2a = BCIDataset(BCI_2A_PATH, '2a', nc, sr)
+        bci_2b = BCIDataset(BCI_2B_PATH, '2b', nc, sr)
+        tr_ds = ConcatDataset([bci_2a, bci_2b])
 
     elif args.dataset == 'combined':
         sleep_tr = UnlabeledWrapper(SleepEDFDataset(
