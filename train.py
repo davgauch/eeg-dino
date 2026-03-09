@@ -1,23 +1,25 @@
-"""EEG-DINO Pre-Training on Sleep-EDF."""
+"""EEG-DINO Pre-Training on Sleep-EDF (+ optional BCI-IV 2a/2b)."""
 
 import os, math, argparse, random
 import torch
 import torch.nn as nn
 import numpy as np
 from tqdm import tqdm
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
 
 from eeg_dino_model import StudentModel, TeacherModel
 from channel_aware_sampling import ChannelAwareSampling
 from losses import DINOLoss, PatchLoss
 
 SLEEP_EDF_PATH = '/net/inltitan2.epfl.ch/scratch2/tzhu/EEGPT/datasets/downstream/sleep_edf/'
+BCI_2A_PATH = '/net/inltitan2.epfl.ch/scratch2/tzhu/EEGPT/datasets/downstream/Raw_data/BCICIV_2a_gdf/'
+BCI_2B_PATH = '/net/inltitan2.epfl.ch/scratch2/tzhu/EEGPT/datasets/downstream/Raw_data/BCICIV_2b_gdf/'
 
 CONFIG = dict(
     n_channels=2, sampling_rate=200,
     embed_dim=64, n_layers=2, n_heads=4, mlp_dim=128,
     out_dim=4096, head_hidden_dim=256, head_bottleneck_dim=64,
-    n_local_views=8, n_masked_views=2, batch_size=64,
+    n_local_views=4, n_masked_views=1, batch_size=64,
     learning_rate=1.25e-4,       # DINO scaling: 5e-4 × 64/256
     warmup_epochs=10,
     weight_decay_start=0.04, weight_decay_end=0.40,
@@ -78,6 +80,68 @@ class SleepEDFDataset(Dataset):
         return self.data[idx], self.labels[idx]
 
 
+class BCIDataset(Dataset):
+    """BCI Competition IV 2a/2b for self-supervised pretraining.
+
+    Loads raw GDF files via MNE, picks EEG channels (drops EOG),
+    resamples to target rate, cuts into 30s windows.
+    At __getitem__ time, randomly samples n_channels from available EEG channels.
+    """
+
+    def __init__(self, root, dataset='2a', n_channels=2, sampling_rate=200):
+        import mne
+        from glob import glob
+        mne.set_log_level('WARNING')
+
+        self.n_channels = n_channels
+        self.sampling_rate = sampling_rate
+        self.epoch_len = sampling_rate * 30  # 30s windows
+
+        gdf_files = sorted(glob(os.path.join(root, '*.gdf')))
+        print(f"[BCI-{dataset}] {len(gdf_files)} GDF files, loading...")
+
+        self.windows = []  # list of (n_eeg, epoch_len) tensors
+        for fp in tqdm(gdf_files, desc=f"BCI-{dataset}"):
+            try:
+                raw = mne.io.read_raw_gdf(fp, preload=True)
+                # Keep only EEG channels, drop EOG
+                eeg_idx = [i for i, ch in enumerate(raw.ch_names)
+                           if 'EOG' not in ch]
+                raw.pick(eeg_idx)
+                if raw.info['sfreq'] != sampling_rate:
+                    raw.resample(sampling_rate)
+
+                data = torch.from_numpy(raw.get_data().copy()).float()  # (n_eeg, n_times)
+                n_times = data.shape[1]
+
+                # Cut into 30s non-overlapping windows
+                for i in range(n_times // self.epoch_len):
+                    window = data[:, i * self.epoch_len:(i + 1) * self.epoch_len]
+                    window = (window - window.mean()) / (window.std() + 1e-8)
+                    self.windows.append(window)
+            except Exception as e:
+                print(f"  Skip {fp}: {e}")
+
+        n_eeg = self.windows[0].shape[0] if self.windows else '?'
+        print(f"  → {len(self.windows)} windows ({n_eeg} EEG ch, "
+              f"{len(self.windows) * 30 / 60:.0f} min)")
+
+    def __len__(self):
+        return len(self.windows)
+
+    def __getitem__(self, idx):
+        window = self.windows[idx]  # (n_eeg, epoch_len)
+        n_eeg = window.shape[0]
+        if n_eeg <= self.n_channels:
+            if n_eeg < self.n_channels:
+                pad = torch.zeros(self.n_channels - n_eeg, self.epoch_len)
+                return torch.cat([window, pad], dim=0)
+            return window
+        # Randomly sample n_channels from available EEG channels
+        ch_idx = torch.randperm(n_eeg)[:self.n_channels].sort()[0]
+        return window[ch_idx]
+
+
 class UnlabeledWrapper(Dataset):
     """Strip labels for self-supervised pre-training."""
     def __init__(self, ds):
@@ -105,7 +169,7 @@ class EEGDINOTrainer:
     def __init__(self, n_channels=2, sampling_rate=200, embed_dim=64,
                  n_layers=2, n_heads=4, mlp_dim=128, out_dim=4096,
                  head_hidden_dim=256, head_bottleneck_dim=64,
-                 n_local_views=8, n_masked_views=2, batch_size=64,
+                 n_local_views=4, n_masked_views=1, batch_size=64,
                  learning_rate=1.25e-4, weight_decay_start=0.04,
                  weight_decay_end=0.40, momentum_start=0.996,
                  momentum_end=1.0, warmup_epochs=10, n_epochs=100,
@@ -323,6 +387,9 @@ def main():
                    help='Frequency masking: band name (alpha), combine with + '
                         '(alpha+beta), or random/none/all')
     p.add_argument('--seed', type=int, default=42, help='Random seed')
+    p.add_argument('--dataset', default='sleep_edf',
+                   choices=['sleep_edf', 'bci_2a', 'bci_2b', 'combined'],
+                   help='Pretraining dataset(s)')
     p.add_argument('--preset', default='tiny', choices=['tiny'])  # for evaluate.py compat
     args = p.parse_args()
 
@@ -339,24 +406,45 @@ def main():
     if args.lr:          cfg['learning_rate'] = args.lr
     if args.mask_strategy: cfg['mask_strategy'] = args.mask_strategy
 
-    print("EEG-DINO | Sleep-EDF | tiny")
+    print(f"EEG-DINO | {args.dataset} | tiny")
     for k, v in sorted(cfg.items()):
         print(f"  {k}: {v}")
 
-    # Load data
-    tr_ds = UnlabeledWrapper(SleepEDFDataset(
-        SLEEP_EDF_PATH, 'TrainFold', cfg['n_channels'],
-        cfg['sampling_rate'], args.max_train))
-    va_ds = UnlabeledWrapper(SleepEDFDataset(
-        SLEEP_EDF_PATH, 'ValidFold', cfg['n_channels'],
-        cfg['sampling_rate'], args.max_val))
-    print(f"Train: {len(tr_ds)} | Val: {len(va_ds)}")
+    # --- Load data based on dataset choice ---
+    nc, sr = cfg['n_channels'], cfg['sampling_rate']
+    va_ds = None
+
+    if args.dataset == 'sleep_edf':
+        tr_ds = UnlabeledWrapper(SleepEDFDataset(
+            SLEEP_EDF_PATH, 'TrainFold', nc, sr, args.max_train))
+        va_ds = UnlabeledWrapper(SleepEDFDataset(
+            SLEEP_EDF_PATH, 'ValidFold', nc, sr, args.max_val))
+
+    elif args.dataset == 'bci_2a':
+        tr_ds = BCIDataset(BCI_2A_PATH, '2a', nc, sr)
+
+    elif args.dataset == 'bci_2b':
+        tr_ds = BCIDataset(BCI_2B_PATH, '2b', nc, sr)
+
+    elif args.dataset == 'combined':
+        sleep_tr = UnlabeledWrapper(SleepEDFDataset(
+            SLEEP_EDF_PATH, 'TrainFold', nc, sr, args.max_train))
+        bci_2a = BCIDataset(BCI_2A_PATH, '2a', nc, sr)
+        bci_2b = BCIDataset(BCI_2B_PATH, '2b', nc, sr)
+        tr_ds = ConcatDataset([sleep_tr, bci_2a, bci_2b])
+        va_ds = UnlabeledWrapper(SleepEDFDataset(
+            SLEEP_EDF_PATH, 'ValidFold', nc, sr, args.max_val))
+
+    val_str = f" | Val: {len(va_ds)}" if va_ds else ""
+    print(f"Train: {len(tr_ds)}{val_str}")
 
     cuda = cfg['device'] != 'cpu'
     tr_loader = DataLoader(tr_ds, cfg['batch_size'], shuffle=True,
                            num_workers=4, pin_memory=cuda, drop_last=True)
-    va_loader = DataLoader(va_ds, cfg['batch_size'], shuffle=False,
-                           num_workers=4, pin_memory=cuda)
+    va_loader = None
+    if va_ds:
+        va_loader = DataLoader(va_ds, cfg['batch_size'], shuffle=False,
+                               num_workers=4, pin_memory=cuda)
 
     trainer = EEGDINOTrainer(**cfg)
     trainer.train(tr_loader, va_loader, save_dir=args.save_dir)
