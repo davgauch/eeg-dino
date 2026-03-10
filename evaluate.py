@@ -14,7 +14,7 @@ from tqdm import tqdm
 from eeg_dino_model import EEGTransformer
 from tfe_module import TimeFrequencyEmbedding
 from dpe_module import DecoupledPositionalEmbedding
-from train import SleepEDFDataset, SLEEP_EDF_PATH, CONFIG
+from train import SleepEDFDataset, SLEEP_EDF_PATH, PRESETS
 
 
 class FrozenBackbone(nn.Module):
@@ -135,14 +135,15 @@ def main():
     p.add_argument('--max_samples', type=int, default=None)
     p.add_argument('--probe_epochs', type=int, default=50)
     p.add_argument('--probe_lr', type=float, default=1e-3)
-    p.add_argument('--preset', default='tiny', choices=['tiny'])  # compat only
+    p.add_argument('--preset', default='tiny', choices=list(PRESETS.keys()))
     args = p.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    cfg = PRESETS[args.preset]
 
     backbone = FrozenBackbone(
-        CONFIG['n_channels'], CONFIG['sampling_rate'],
-        CONFIG['embed_dim'], CONFIG['n_layers'], CONFIG['n_heads'], CONFIG['mlp_dim']
+        cfg['n_channels'], cfg['sampling_rate'],
+        cfg['embed_dim'], cfg['n_layers'], cfg['n_heads'], cfg['mlp_dim']
     ).to(device)
 
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=True)
@@ -156,7 +157,7 @@ def main():
     print(f"Loaded backbone from {args.checkpoint} (epoch {ckpt.get('epoch', '?')})")
 
     # Load Sleep-EDF splits
-    n_ch, sr = CONFIG['n_channels'], CONFIG['sampling_rate']
+    n_ch, sr = cfg['n_channels'], cfg['sampling_rate']
     train_ds = SleepEDFDataset(SLEEP_EDF_PATH, 'TrainFold', n_ch, sr, args.max_samples)
     val_ds   = SleepEDFDataset(SLEEP_EDF_PATH, 'ValidFold', n_ch, sr, args.max_samples)
     test_ds  = SleepEDFDataset(SLEEP_EDF_PATH, 'TestFold',  n_ch, sr, args.max_samples)
@@ -168,7 +169,7 @@ def main():
     # Train linear probe
     probe, val_acc = train_linear_probe(
         backbone, train_loader, val_loader, args.n_classes,
-        CONFIG['embed_dim'], device, args.probe_epochs, args.probe_lr)
+        cfg['embed_dim'], device, args.probe_epochs, args.probe_lr)
 
     # Evaluate on test
     class_names = ['Wake', 'N1', 'N2', 'N3', 'REM']

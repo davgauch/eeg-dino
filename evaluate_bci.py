@@ -1,16 +1,15 @@
 """EEG-DINO Linear Probing on BCI Competition IV 2a/2b.
 
-Leave-One-Subject-Out (LOSO) evaluation for cross-subject generalization:
-  - For each held-out subject: train probe on all other subjects, test on held-out
-  - Reports per-subject and mean +/- std across subjects
+LOSO (Leave-One-Subject-Out) — cross-subject generalization:
+  Train probe on 8 subjects' T sessions, test on held-out subject's E session.
+  No data leakage: backbone pretrained on T sessions only, E sessions are unseen.
 
-Also supports within-subject evaluation (--eval_mode within):
-  - Train probe on subject's T session, test on E session
+  2a: 22 EEG channels, 250 Hz, 4 classes (left hand, right hand, feet, tongue)
+  2b:  3 EEG channels, 250 Hz, 2 classes (left hand, right hand)
 
 Usage:
-  python evaluate_bci.py --checkpoint checkpoints/bci_all_theta/best_model.pth --bci 2a
-  python evaluate_bci.py --checkpoint checkpoints/bci_all_theta/best_model.pth --bci 2b
-  python evaluate_bci.py --checkpoint checkpoints/bci_all_theta/best_model.pth --bci 2a --eval_mode within
+  python evaluate_bci.py --checkpoint checkpoints/bci_2a_theta/best_model.pth --bci 2a
+  python evaluate_bci.py --checkpoint checkpoints/bci_2b_theta/best_model.pth --bci 2b --preset bci_2b
 """
 
 import os, argparse
@@ -24,12 +23,7 @@ from tqdm import tqdm
 from eeg_dino_model import EEGTransformer
 from tfe_module import TimeFrequencyEmbedding
 from dpe_module import DecoupledPositionalEmbedding
-from train import CONFIG, BCI_2A_PATH, BCI_2B_PATH
-
-
-# Motor cortex channels
-CHANNELS_2A = ['C3', 'C4']
-CHANNELS_2B = ['C3', 'C4']
+from train import PRESETS, BCI_2A_PATH, BCI_2B_PATH
 
 
 class FrozenBackbone(nn.Module):
@@ -52,56 +46,41 @@ class FrozenBackbone(nn.Module):
 
 
 class BCITrialDataset(Dataset):
-    """Labeled motor imagery trials from a single BCI GDF session."""
+    """Labeled motor imagery trials from a single BCI GDF session.
 
-    def __init__(self, gdf_path, n_channels=2, sampling_rate=200,
-                 channels=None, trial_duration=4.0,
-                 label_source='events', mat_path=None):
+    Extracts trial epochs after cue onset. NO tiling — returns the raw
+    trial duration (e.g. 4s at 250Hz = 1000 samples → 4 TFE tokens).
+    Labels always from .mat file (2a GDF has no class-label events).
+    Keeps all EEG channels, excludes EOG.
+    """
+
+    def __init__(self, gdf_path, n_channels, sampling_rate, trial_duration,
+                 mat_path):
         import mne
+        import scipy.io
         mne.set_log_level('WARNING')
 
         self.n_channels = n_channels
         self.sampling_rate = sampling_rate
-        self.epoch_len = sampling_rate * 30
 
         trial_samples = int(trial_duration * sampling_rate)
         cue_offset = int(0.5 * sampling_rate)
 
         raw = mne.io.read_raw_gdf(gdf_path, preload=True)
-
-        if channels:
-            pick_idx = []
-            for target in channels:
-                for i, ch in enumerate(raw.ch_names):
-                    if target in ch:
-                        pick_idx.append(i)
-                        break
-            raw.pick(pick_idx)
-        else:
-            eeg_idx = [i for i, ch in enumerate(raw.ch_names) if 'EOG' not in ch]
-            raw.pick(eeg_idx)
-
+        eeg_idx = [i for i, ch in enumerate(raw.ch_names) if 'EOG' not in ch]
+        raw.pick(eeg_idx)
         if raw.info['sfreq'] != sampling_rate:
             raw.resample(sampling_rate)
 
         data = torch.from_numpy(raw.get_data().copy()).float()
         events, event_id = mne.events_from_annotations(raw)
 
-        trials = []
-        if label_source == 'events':
-            class_codes = {v: int(k) - 769
-                           for k, v in event_id.items()
-                           if k in ('769', '770', '771', '772')}
-            for ev in events:
-                if ev[2] in class_codes:
-                    trials.append((ev[0], class_codes[ev[2]]))
-        elif label_source == 'mat':
-            import scipy.io
-            mat = scipy.io.loadmat(mat_path)
-            labels = mat['classlabel'].flatten().astype(int) - 1
-            onset_code = event_id.get('768')
-            onsets = [ev[0] for ev in events if ev[2] == onset_code]
-            trials = list(zip(onsets, labels))
+        # Labels always from .mat
+        mat = scipy.io.loadmat(mat_path)
+        labels = mat['classlabel'].flatten().astype(int) - 1
+        onset_code = event_id.get('768')
+        onsets = [ev[0] for ev in events if ev[2] == onset_code]
+        trials = list(zip(onsets, labels[:len(onsets)]))
 
         self.data, self.labels = [], []
         for onset, label in trials:
@@ -117,10 +96,7 @@ class BCITrialDataset(Dataset):
                 pad = torch.zeros(n_channels - trial.shape[0], trial_samples)
                 trial = torch.cat([trial, pad], dim=0)
 
-            n_rep = (self.epoch_len + trial_samples - 1) // trial_samples
-            trial = trial.repeat(1, n_rep)[:, :self.epoch_len]
             trial = (trial - trial.mean()) / (trial.std() + 1e-8)
-
             self.data.append(trial)
             self.labels.append(label)
 
@@ -144,53 +120,7 @@ class _ListDataset(Dataset):
 
 
 # ─────────────────────────────────────────────────────────────
-# Subject loading
-# ─────────────────────────────────────────────────────────────
-
-def load_subject_data_2a(root, sid, nc, sr, channels, td):
-    """Load all labeled trials for one 2a subject (T + E sessions)."""
-    t_gdf = os.path.join(root, f'{sid}T.gdf')
-    e_gdf = os.path.join(root, f'{sid}E.gdf')
-    e_mat = os.path.join(root, f'{sid}E.mat')
-
-    datasets = []
-    if os.path.exists(t_gdf):
-        datasets.append(BCITrialDataset(t_gdf, nc, sr, channels, td, 'events'))
-    if os.path.exists(e_gdf) and os.path.exists(e_mat):
-        datasets.append(BCITrialDataset(e_gdf, nc, sr, channels, td, 'mat', e_mat))
-
-    data, labels = [], []
-    for ds in datasets:
-        data.extend(ds.data)
-        labels.append(ds.labels)
-    return data, torch.cat(labels) if labels else torch.tensor([], dtype=torch.long)
-
-
-def load_subject_data_2b(root, sid, nc, sr, channels, td):
-    """Load all labeled trials for one 2b subject (sessions 1-5)."""
-    s_num = int(sid[1:])
-    data, labels = [], []
-
-    for sess in (1, 2, 3):
-        gdf = os.path.join(root, f'B{s_num:02d}{sess:02d}T.gdf')
-        if os.path.exists(gdf):
-            ds = BCITrialDataset(gdf, nc, sr, channels, td, 'events')
-            data.extend(ds.data)
-            labels.append(ds.labels)
-
-    for sess in (4, 5):
-        gdf = os.path.join(root, f'B{s_num:02d}{sess:02d}E.gdf')
-        mat = os.path.join(root, f'B{s_num:02d}{sess:02d}E.mat')
-        if os.path.exists(gdf) and os.path.exists(mat):
-            ds = BCITrialDataset(gdf, nc, sr, channels, td, 'mat', mat)
-            data.extend(ds.data)
-            labels.append(ds.labels)
-
-    return data, torch.cat(labels) if labels else torch.tensor([], dtype=torch.long)
-
-
-# ─────────────────────────────────────────────────────────────
-# Feature extraction & linear probe
+# Feature extraction
 # ─────────────────────────────────────────────────────────────
 
 def extract_features(backbone, loader, device):
@@ -203,6 +133,10 @@ def extract_features(backbone, loader, device):
     return torch.cat(feats), torch.cat(labels)
 
 
+# ─────────────────────────────────────────────────────────────
+# Linear probe with validation + early stopping
+# ─────────────────────────────────────────────────────────────
+
 def train_and_eval(backbone, train_ds, test_ds, embed_dim, device,
                    epochs=100, lr=1e-3, batch_size=64):
     tr_loader = DataLoader(train_ds, batch_size, shuffle=True, num_workers=0)
@@ -211,20 +145,46 @@ def train_and_eval(backbone, train_ds, test_ds, embed_dim, device,
     tr_f, tr_y = extract_features(backbone, tr_loader, device)
     te_f, te_y = extract_features(backbone, te_loader, device)
 
+    # 80/20 train/val split for early stopping
+    n = len(tr_f)
+    perm = torch.randperm(n)
+    split = int(0.8 * n)
+    train_idx, val_idx = perm[:split], perm[split:]
+
     n_classes = int(tr_y.max().item()) + 1
     probe = nn.Linear(embed_dim, n_classes).to(device)
     opt = torch.optim.Adam(probe.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
 
+    best_val_acc, best_state = 0, None
+    patience, wait = 15, 0
+
     for ep in range(epochs):
         probe.train()
-        idx = torch.randperm(len(tr_f))
-        for i in range(0, len(tr_f), batch_size):
+        idx = train_idx[torch.randperm(len(train_idx))]
+        for i in range(0, len(idx), batch_size):
             b = idx[i:i+batch_size]
             loss = criterion(probe(tr_f[b].to(device)), tr_y[b].to(device))
             opt.zero_grad()
             loss.backward()
             opt.step()
+
+        probe.eval()
+        with torch.no_grad():
+            val_preds = probe(tr_f[val_idx].to(device)).argmax(1).cpu()
+            val_acc = (val_preds == tr_y[val_idx]).float().mean().item()
+
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_state = {k: v.clone() for k, v in probe.state_dict().items()}
+            wait = 0
+        else:
+            wait += 1
+            if wait >= patience:
+                break
+
+    if best_state is not None:
+        probe.load_state_dict(best_state)
 
     probe.eval()
     with torch.no_grad():
@@ -236,46 +196,101 @@ def train_and_eval(backbone, train_ds, test_ds, embed_dim, device,
 
 
 # ─────────────────────────────────────────────────────────────
-# LOSO evaluation
+# Subject loading — separate T (train) and E (test) sessions
+# ─────────────────────────────────────────────────────────────
+
+def load_subject_2a(root, sid, nc, sr, td):
+    """Return (train_ds from T session, test_ds from E session)."""
+    t_gdf = os.path.join(root, f'{sid}T.gdf')
+    t_mat = os.path.join(root, f'{sid}T.mat')
+    e_gdf = os.path.join(root, f'{sid}E.gdf')
+    e_mat = os.path.join(root, f'{sid}E.mat')
+    train_ds = BCITrialDataset(t_gdf, nc, sr, td, t_mat)
+    test_ds = BCITrialDataset(e_gdf, nc, sr, td, e_mat)
+    return train_ds, test_ds
+
+
+def load_subject_2b(root, sid, nc, sr, td):
+    """Return (train_ds from T sessions 1-3, test_ds from E sessions 4-5)."""
+    s_num = int(sid[1:])
+
+    train_data, train_labels = [], []
+    for sess in (1, 2, 3):
+        gdf = os.path.join(root, f'B{s_num:02d}{sess:02d}T.gdf')
+        mat = os.path.join(root, f'B{s_num:02d}{sess:02d}T.mat')
+        if os.path.exists(gdf) and os.path.exists(mat):
+            ds = BCITrialDataset(gdf, nc, sr, td, mat)
+            train_data.extend(ds.data)
+            train_labels.append(ds.labels)
+
+    test_data, test_labels = [], []
+    for sess in (4, 5):
+        gdf = os.path.join(root, f'B{s_num:02d}{sess:02d}E.gdf')
+        mat = os.path.join(root, f'B{s_num:02d}{sess:02d}E.mat')
+        if os.path.exists(gdf) and os.path.exists(mat):
+            ds = BCITrialDataset(gdf, nc, sr, td, mat)
+            test_data.extend(ds.data)
+            test_labels.append(ds.labels)
+
+    train_ds = _ListDataset(train_data, torch.cat(train_labels))
+    test_ds = _ListDataset(test_data, torch.cat(test_labels))
+    return train_ds, test_ds
+
+
+# ─────────────────────────────────────────────────────────────
+# LOSO: train probe on 8 subj T sessions, test on held-out E session
 # ─────────────────────────────────────────────────────────────
 
 def eval_loso(backbone, bci, cfg, args):
-    """Leave-One-Subject-Out: train probe on 8 subjects, test on 1."""
     nc, sr, td = cfg['n_channels'], cfg['sampling_rate'], args.trial_duration
     device = next(backbone.parameters()).device
 
     if bci == '2a':
-        channels = CHANNELS_2A
         subjects = [f'A{s:02d}' for s in range(1, 10)]
-        load_fn = lambda sid: load_subject_data_2a(BCI_2A_PATH, sid, nc, sr, channels, td)
     else:
-        channels = CHANNELS_2B
         subjects = [f'B{s:02d}' for s in range(1, 10)]
-        load_fn = lambda sid: load_subject_data_2b(BCI_2B_PATH, sid, nc, sr, channels, td)
 
-    print(f"Loading all {len(subjects)} subjects...")
-    all_data = {}
+    # Load T and E sessions separately per subject
+    print(f"Loading {len(subjects)} subjects (T=probe train, E=probe test)...")
+    all_train, all_test = {}, {}
     for sid in tqdm(subjects, desc="Subjects"):
-        data, labels = load_fn(sid)
-        all_data[sid] = (data, labels)
-        print(f"  {sid}: {len(data)} trials")
+        if bci == '2a':
+            tr, te = load_subject_2a(BCI_2A_PATH, sid, nc, sr, td)
+        else:
+            tr, te = load_subject_2b(BCI_2B_PATH, sid, nc, sr, td)
+        all_train[sid] = tr
+        all_test[sid] = te
+        print(f"  {sid}: T={len(tr)} trials, E={len(te)} trials")
 
+    # LOSO loop
     results = []
     for test_sid in subjects:
         print(f"\n--- LOSO: held-out {test_sid} ---")
 
+        # Probe train: T sessions from other 8 subjects
         train_data, train_labels = [], []
         for sid in subjects:
             if sid == test_sid:
                 continue
-            train_data.extend(all_data[sid][0])
-            train_labels.append(all_data[sid][1])
+            ds = all_train[sid]
+            if isinstance(ds, _ListDataset):
+                train_data.extend(ds.data)
+                train_labels.append(ds.labels)
+            else:
+                train_data.extend(ds.data)
+                train_labels.append(ds.labels)
 
         train_ds = _ListDataset(train_data, torch.cat(train_labels))
-        test_ds = _ListDataset(*all_data[test_sid])
 
-        print(f"  Train: {len(train_ds)} trials ({len(subjects)-1} subj) | "
-              f"Test: {len(test_ds)} trials (subj {test_sid})")
+        # Probe test: E session from held-out subject
+        te = all_test[test_sid]
+        if isinstance(te, _ListDataset):
+            test_ds = te
+        else:
+            test_ds = _ListDataset(te.data, te.labels)
+
+        print(f"  Train: {len(train_ds)} trials ({len(subjects)-1} subj T) | "
+              f"Test: {len(test_ds)} trials ({test_sid} E)")
 
         acc, f1, kappa = train_and_eval(
             backbone, train_ds, test_ds, cfg['embed_dim'], device,
@@ -287,93 +302,22 @@ def eval_loso(backbone, bci, cfg, args):
 
 
 # ─────────────────────────────────────────────────────────────
-# Within-subject evaluation
-# ─────────────────────────────────────────────────────────────
-
-def eval_within(backbone, bci, cfg, args):
-    """Within-subject: train probe on T session(s), test on E session(s)."""
-    nc, sr, td = cfg['n_channels'], cfg['sampling_rate'], args.trial_duration
-    device = next(backbone.parameters()).device
-
-    results = []
-
-    if bci == '2a':
-        channels = CHANNELS_2A
-        for s in range(1, 10):
-            sid = f'A{s:02d}'
-            t_gdf = os.path.join(BCI_2A_PATH, f'{sid}T.gdf')
-            e_gdf = os.path.join(BCI_2A_PATH, f'{sid}E.gdf')
-            e_mat = os.path.join(BCI_2A_PATH, f'{sid}E.mat')
-            if not (os.path.exists(t_gdf) and os.path.exists(e_gdf)):
-                continue
-
-            print(f"\n--- Subject {sid} (within) ---")
-            train_ds = BCITrialDataset(t_gdf, nc, sr, channels, td, 'events')
-            test_ds = BCITrialDataset(e_gdf, nc, sr, channels, td, 'mat', e_mat)
-            print(f"  Train: {len(train_ds)} | Test: {len(test_ds)}")
-
-            acc, f1, kappa = train_and_eval(
-                backbone, train_ds, test_ds, cfg['embed_dim'], device,
-                args.probe_epochs, args.probe_lr)
-            print(f"  Acc: {acc:.4f} | F1: {f1:.4f} | Kappa: {kappa:.4f}")
-            results.append({'subject': sid, 'acc': acc, 'f1': f1, 'kappa': kappa})
-
-    elif bci == '2b':
-        channels = CHANNELS_2B
-        for s in range(1, 10):
-            sid = f'B{s:02d}'
-            print(f"\n--- Subject {sid} (within) ---")
-
-            train_data, train_labels = [], []
-            for sess in (1, 2, 3):
-                gdf = os.path.join(BCI_2B_PATH, f'B{s:02d}{sess:02d}T.gdf')
-                if os.path.exists(gdf):
-                    ds = BCITrialDataset(gdf, nc, sr, channels, td, 'events')
-                    train_data.extend(ds.data)
-                    train_labels.append(ds.labels)
-
-            test_data, test_labels = [], []
-            for sess in (4, 5):
-                gdf = os.path.join(BCI_2B_PATH, f'B{s:02d}{sess:02d}E.gdf')
-                mat = os.path.join(BCI_2B_PATH, f'B{s:02d}{sess:02d}E.mat')
-                if os.path.exists(gdf) and os.path.exists(mat):
-                    ds = BCITrialDataset(gdf, nc, sr, channels, td, 'mat', mat)
-                    test_data.extend(ds.data)
-                    test_labels.append(ds.labels)
-
-            if not train_data or not test_data:
-                continue
-
-            train_ds = _ListDataset(train_data, torch.cat(train_labels))
-            test_ds = _ListDataset(test_data, torch.cat(test_labels))
-            print(f"  Train: {len(train_ds)} | Test: {len(test_ds)}")
-
-            acc, f1, kappa = train_and_eval(
-                backbone, train_ds, test_ds, cfg['embed_dim'], device,
-                args.probe_epochs, args.probe_lr)
-            print(f"  Acc: {acc:.4f} | F1: {f1:.4f} | Kappa: {kappa:.4f}")
-            results.append({'subject': sid, 'acc': acc, 'f1': f1, 'kappa': kappa})
-
-    return results
-
-
-# ─────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────
 
 def main():
-    p = argparse.ArgumentParser(description='EEG-DINO BCI Evaluation')
+    p = argparse.ArgumentParser(description='EEG-DINO BCI Evaluation (LOSO)')
     p.add_argument('--checkpoint', required=True)
     p.add_argument('--bci', required=True, choices=['2a', '2b'])
-    p.add_argument('--eval_mode', default='loso', choices=['loso', 'within'],
-                   help='loso = cross-subject (default), within = per-subject T->E')
+    p.add_argument('--preset', default='bci_2a', choices=['tiny', 'bci_2a', 'bci_2b'],
+                   help='Model config matching pretraining preset')
     p.add_argument('--probe_epochs', type=int, default=100)
     p.add_argument('--probe_lr', type=float, default=1e-3)
     p.add_argument('--trial_duration', type=float, default=4.0)
     args = p.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    cfg = CONFIG
+    cfg = PRESETS[args.preset]
 
     backbone = FrozenBackbone(
         cfg['n_channels'], cfg['sampling_rate'],
@@ -388,19 +332,18 @@ def main():
                 break
     backbone.load_state_dict(bb_sd, strict=True)
     print(f"Loaded backbone from {args.checkpoint} (epoch {ckpt.get('epoch', '?')})")
-    print(f"Eval mode: {args.eval_mode} | BCI-IV {args.bci}\n")
+    print(f"LOSO | BCI-IV {args.bci} | preset: {args.preset}")
+    print(f"  n_channels={cfg['n_channels']}, sampling_rate={cfg['sampling_rate']}Hz, "
+          f"trial_duration={args.trial_duration}s\n")
 
-    if args.eval_mode == 'loso':
-        results = eval_loso(backbone, args.bci, cfg, args)
-    else:
-        results = eval_within(backbone, args.bci, cfg, args)
+    results = eval_loso(backbone, args.bci, cfg, args)
 
     # Summary
     accs = [r['acc'] for r in results]
     f1s = [r['f1'] for r in results]
     kappas = [r['kappa'] for r in results]
     print(f"\n{'='*50}")
-    print(f"BCI-IV {args.bci} — {args.eval_mode.upper()} — {len(results)} subjects")
+    print(f"BCI-IV {args.bci} -- LOSO -- {len(results)} subjects")
     print(f"  Accuracy : {np.mean(accs):.4f} +/- {np.std(accs):.4f}")
     print(f"  F1 Macro : {np.mean(f1s):.4f} +/- {np.std(f1s):.4f}")
     print(f"  Kappa    : {np.mean(kappas):.4f} +/- {np.std(kappas):.4f}")
