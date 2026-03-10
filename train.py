@@ -143,6 +143,8 @@ class BCIDataset(Dataset):
 
                 for i in range(n_times // self.epoch_len):
                     window = data[:, i * self.epoch_len:(i + 1) * self.epoch_len]
+                    if torch.isnan(window).any():
+                        continue
                     window = (window - window.mean()) / (window.std() + 1e-8)
                     self.windows.append(window)
             except Exception as e:

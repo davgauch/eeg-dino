@@ -46,23 +46,25 @@ class FrozenBackbone(nn.Module):
 
 
 # Delay from event 768 (trial start / fixation cross) to motor imagery onset.
-# 2a: fixation at t=0, cue at t=2s, MI from ~2.5s  →  offset = 2.5s
-# 2b: fixation at t=0, cue at t=3s, MI from ~3.5s  →  offset = 3.5s
-MI_OFFSET = {'2a': 2.5, '2b': 3.5}
+# 2a: fixation at t=0, cue arrow at t=2s, MI until fixation disappears at t=6s
+#     → offset = 2.0s, extract [2.0, 6.0] = 4s MI period
+# 2b: fixation at t=0, cue at t=3s (feedback sessions), MI from cue onset
+#     → offset = 3.0s, extract [3.0, 7.0] = 4s MI period
+MI_OFFSET = {'2a': 2.0, '2b': 3.0}
 
 
 class BCITrialDataset(Dataset):
     """Labeled motor imagery trials from a single BCI GDF session.
 
-    Extracts trial epochs from the motor imagery period (after cue onset
-    + 0.5s reaction time). Event 768 = trial start (fixation cross),
-    mi_offset skips fixation+cue to reach the actual MI window.
+    Extracts trial epochs aligned to the motor imagery period.
+    Event 768 = trial start (fixation cross); mi_offset skips
+    fixation+cue to reach the actual MI window.
     Labels always from .mat file (2a GDF has no class-label events).
     Keeps all EEG channels, excludes EOG.
     """
 
     def __init__(self, gdf_path, n_channels, sampling_rate, trial_duration,
-                 mat_path, mi_offset=2.5):
+                 mat_path, mi_offset=2.0):
         import mne
         import scipy.io
         mne.set_log_level('WARNING')
@@ -97,6 +99,8 @@ class BCITrialDataset(Dataset):
                 continue
 
             trial = data[:, start:end]
+            if torch.isnan(trial).any():
+                continue
             if trial.shape[0] > n_channels:
                 trial = trial[:n_channels]
             elif trial.shape[0] < n_channels:
