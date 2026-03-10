@@ -45,17 +45,24 @@ class FrozenBackbone(nn.Module):
         return cls
 
 
+# Delay from event 768 (trial start / fixation cross) to motor imagery onset.
+# 2a: fixation at t=0, cue at t=2s, MI from ~2.5s  →  offset = 2.5s
+# 2b: fixation at t=0, cue at t=3s, MI from ~3.5s  →  offset = 3.5s
+MI_OFFSET = {'2a': 2.5, '2b': 3.5}
+
+
 class BCITrialDataset(Dataset):
     """Labeled motor imagery trials from a single BCI GDF session.
 
-    Extracts trial epochs after cue onset. NO tiling — returns the raw
-    trial duration (e.g. 4s at 250Hz = 1000 samples → 4 TFE tokens).
+    Extracts trial epochs from the motor imagery period (after cue onset
+    + 0.5s reaction time). Event 768 = trial start (fixation cross),
+    mi_offset skips fixation+cue to reach the actual MI window.
     Labels always from .mat file (2a GDF has no class-label events).
     Keeps all EEG channels, excludes EOG.
     """
 
     def __init__(self, gdf_path, n_channels, sampling_rate, trial_duration,
-                 mat_path):
+                 mat_path, mi_offset=2.5):
         import mne
         import scipy.io
         mne.set_log_level('WARNING')
@@ -64,7 +71,7 @@ class BCITrialDataset(Dataset):
         self.sampling_rate = sampling_rate
 
         trial_samples = int(trial_duration * sampling_rate)
-        cue_offset = int(0.5 * sampling_rate)
+        offset_samples = int(mi_offset * sampling_rate)
 
         raw = mne.io.read_raw_gdf(gdf_path, preload=True)
         eeg_idx = [i for i, ch in enumerate(raw.ch_names) if 'EOG' not in ch]
@@ -84,7 +91,7 @@ class BCITrialDataset(Dataset):
 
         self.data, self.labels = [], []
         for onset, label in trials:
-            start = onset + cue_offset
+            start = onset + offset_samples
             end = start + trial_samples
             if end > data.shape[1]:
                 continue
@@ -201,17 +208,19 @@ def train_and_eval(backbone, train_ds, test_ds, embed_dim, device,
 
 def load_subject_2a(root, sid, nc, sr, td):
     """Return (train_ds from T session, test_ds from E session)."""
+    mi_off = MI_OFFSET['2a']
     t_gdf = os.path.join(root, f'{sid}T.gdf')
     t_mat = os.path.join(root, f'{sid}T.mat')
     e_gdf = os.path.join(root, f'{sid}E.gdf')
     e_mat = os.path.join(root, f'{sid}E.mat')
-    train_ds = BCITrialDataset(t_gdf, nc, sr, td, t_mat)
-    test_ds = BCITrialDataset(e_gdf, nc, sr, td, e_mat)
+    train_ds = BCITrialDataset(t_gdf, nc, sr, td, t_mat, mi_off)
+    test_ds = BCITrialDataset(e_gdf, nc, sr, td, e_mat, mi_off)
     return train_ds, test_ds
 
 
 def load_subject_2b(root, sid, nc, sr, td):
     """Return (train_ds from T sessions 1-3, test_ds from E sessions 4-5)."""
+    mi_off = MI_OFFSET['2b']
     s_num = int(sid[1:])
 
     train_data, train_labels = [], []
@@ -219,7 +228,7 @@ def load_subject_2b(root, sid, nc, sr, td):
         gdf = os.path.join(root, f'B{s_num:02d}{sess:02d}T.gdf')
         mat = os.path.join(root, f'B{s_num:02d}{sess:02d}T.mat')
         if os.path.exists(gdf) and os.path.exists(mat):
-            ds = BCITrialDataset(gdf, nc, sr, td, mat)
+            ds = BCITrialDataset(gdf, nc, sr, td, mat, mi_off)
             train_data.extend(ds.data)
             train_labels.append(ds.labels)
 
@@ -228,7 +237,7 @@ def load_subject_2b(root, sid, nc, sr, td):
         gdf = os.path.join(root, f'B{s_num:02d}{sess:02d}E.gdf')
         mat = os.path.join(root, f'B{s_num:02d}{sess:02d}E.mat')
         if os.path.exists(gdf) and os.path.exists(mat):
-            ds = BCITrialDataset(gdf, nc, sr, td, mat)
+            ds = BCITrialDataset(gdf, nc, sr, td, mat, mi_off)
             test_data.extend(ds.data)
             test_labels.append(ds.labels)
 
