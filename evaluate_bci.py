@@ -41,7 +41,7 @@ class FrozenBackbone(nn.Module):
         if channel_indices is None:
             channel_indices = torch.arange(x.shape[1], device=x.device)
             channel_indices = channel_indices.unsqueeze(0).expand(x.shape[0], -1)
-        # Mirror StudentModel: if input has fewer channels than model expects,
+        #  if input has fewer channels than model expects,
         # scatter into a zero tensor at the correct channel positions.
         if x.shape[1] < self.n_channels:
             ci = channel_indices[0].clamp(0, self.n_channels - 1)
