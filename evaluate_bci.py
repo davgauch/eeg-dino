@@ -50,25 +50,37 @@ class FrozenBackbone(nn.Module):
 
 
 def get_mi_offset(bci_type, trial_duration):
-    """Get MI extraction offset from event 768 to match trial_duration.
+    """Calculate MI extraction offset based on official BCI Competition IV timing.
     
-    Returns offset in seconds to extract trial_duration seconds of data.
-    Automatically adjusts to include MI period + context when needed.
+    Official 2a timing (desc_2a.pdf):
+      t=0s: Event 768 (fixation cross)
+      t=2s: Cue onset (arrow) for 1.25s
+      t=6s: Fixation disappears (end of MI)
+      MI period: [2.0s, 6.0s] = 4s
+    
+    Official 2b timing (desc_2b.pdf):
+      Screening (01T, 02T): Similar to 2a
+      Feedback (03T-05E): t=3s cue, t=7.5s end
+      MI period: [3.0s, 7.0s] or [3.0s, 7.5s]
+    
+    For 6s extraction matching pretraining epoch_duration=6:
+      Extract window that includes trial context (fixation+cue+MI)
+      to match pretraining's sliding windows over mixed content.
     """
     if bci_type == '2a':
         if trial_duration <= 4.0:
             return 2.0
         elif trial_duration <= 5.0:
             return 1.5
-        else:
-            return 1.0
-    else:
+        else:  
+            return 0.5
+    else:  # 2b
         if trial_duration <= 4.0:
             return 3.0
         elif trial_duration <= 5.0:
             return 2.5
-        else:
-            return 2.0
+        else:  
+            return 1.5
 
 
 class BCITrialDataset(Dataset):
@@ -353,12 +365,92 @@ def main():
         backbone.load_state_dict(bb_sd, strict=True)
         print(f"Loaded backbone from {args.checkpoint} (epoch {ckpt.get('epoch', '?')})")
 
-    mode_label = 'WITHIN-SUBJECT' if args.mode == 'within' else 'LOSO'
-    print(f"\n{mode_label} | BCI-IV {args.bci} | preset: {args.preset}")
-    print(f"  n_channels={cfg['n_channels']}, sampling_rate={cfg['sampling_rate']}Hz")
-    print(f"  trial_duration={args.trial_duration}s, mi_offset={mi_offset}s")
-    print(f"  → Extracting [{mi_offset}, {mi_offset + args.trial_duration}]s from event 768\n")
-
+    # ========================================
+    # ADD DIAGNOSTIC PRINTS HERE
+    # ========================================
+    
+    print("\n" + "="*60)
+    print("DIAGNOSTIC CHECKS")
+    print("="*60)
+    
+    # Check 1: Model architecture
+    print(f"\n1. Model Architecture:")
+    print(f"   Backbone expects: {backbone.n_channels} channels")
+    print(f"   Sampling rate: {cfg['sampling_rate']} Hz")
+    print(f"   Embed dim: {cfg['embed_dim']}")
+    
+    # Check 2: Load one trial to verify data format
+    print(f"\n2. Loading Test Trial:")
+    test_subject = 'A01' if args.bci == '2a' else 'B01'
+    if args.bci == '2a':
+        test_gdf = os.path.join(BCI_2A_PATH, f'{test_subject}E.gdf')
+        test_mat = os.path.join(BCI_2A_PATH, f'{test_subject}E.mat')
+    else:
+        test_gdf = os.path.join(BCI_2B_PATH, f'B0104E.gdf')
+        test_mat = os.path.join(BCI_2B_PATH, f'B0104E.mat')
+    
+    test_ds = BCITrialDataset(test_gdf, cfg['n_channels'], cfg['sampling_rate'], 
+                              args.trial_duration, test_mat, mi_offset)
+    
+    print(f"   Dataset: {len(test_ds)} trials")
+    print(f"   Trial duration: {args.trial_duration}s")
+    print(f"   MI offset: {mi_offset}s")
+    print(f"   Extraction window: [{mi_offset}, {mi_offset + args.trial_duration}]s from event 768")
+    
+    # Check 3: Inspect one trial
+    x_sample, y_sample = test_ds[0]
+    print(f"\n3. Trial Data Shape:")
+    print(f"   Input shape: {x_sample.shape}  (expected: [22, {int(args.trial_duration * cfg['sampling_rate'])}])")
+    print(f"   Channels provided: {x_sample.shape[0]}")
+    print(f"   Time samples: {x_sample.shape[1]} (= {x_sample.shape[1] / cfg['sampling_rate']:.1f}s)")
+    
+    # Check 4: Forward pass through backbone
+    print(f"\n4. Forward Pass Test:")
+    with torch.no_grad():
+        x_batch = x_sample.unsqueeze(0).to(device)
+        
+        # Check TFE output
+        tokens, raw_features = backbone.tfe(x_batch)
+        print(f"   TFE input: {x_batch.shape}")
+        print(f"   TFE tokens: {tokens.shape}  (expected: [1, {int(args.trial_duration)}, {cfg['embed_dim']}])")
+        print(f"   → Got {tokens.shape[1]} tokens (should be {int(args.trial_duration)} for {args.trial_duration}s)")
+        
+        # Check full backbone output
+        cls_output = backbone(x_batch)
+        print(f"   Backbone CLS output: {cls_output.shape}  (expected: [1, {cfg['embed_dim']}])")
+    
+    # Check 5: Summary
+    print(f"\n5. Validation Summary:")
+    issues = []
+    
+    if x_sample.shape[0] != cfg['n_channels']:
+        issues.append(f"❌ Channel mismatch: got {x_sample.shape[0]}, expected {cfg['n_channels']}")
+    else:
+        print(f"   ✓ Channels: {x_sample.shape[0]} = {cfg['n_channels']}")
+    
+    expected_samples = int(args.trial_duration * cfg['sampling_rate'])
+    if x_sample.shape[1] != expected_samples:
+        issues.append(f"❌ Duration mismatch: got {x_sample.shape[1]} samples, expected {expected_samples}")
+    else:
+        print(f"   ✓ Duration: {x_sample.shape[1]} samples = {args.trial_duration}s @ {cfg['sampling_rate']}Hz")
+    
+    if tokens.shape[1] != int(args.trial_duration):
+        issues.append(f"❌ Token count mismatch: got {tokens.shape[1]}, expected {int(args.trial_duration)}")
+    else:
+        print(f"   ✓ Tokens: {tokens.shape[1]} = {int(args.trial_duration)}s @ 1 token/sec")
+    
+    if issues:
+        print(f"\n⚠️  ISSUES FOUND:")
+        for issue in issues:
+            print(f"   {issue}")
+    else:
+        print(f"\n✓ All checks passed!")
+    
+    print("="*60 + "\n")
+    
+    # ========================================
+    # END DIAGNOSTIC PRINTS
+    # ========================================
     if args.mode == 'within':
         results = eval_within_subject(backbone, args.bci, cfg, args, mi_offset)
     else:
