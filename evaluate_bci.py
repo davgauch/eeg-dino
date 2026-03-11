@@ -1,15 +1,16 @@
 """EEG-DINO Linear Probing on BCI Competition IV 2a/2b.
 
-LOSO (Leave-One-Subject-Out) — cross-subject generalization:
-  Train probe on 8 subjects' T sessions, test on held-out subject's E session.
-  No data leakage: backbone pretrained on T sessions only, E sessions are unseen.
+Evaluation modes:
+  within  — Within-subject: per-subject T→E probe (standard BCI eval).
+  loso    — Cross-subject LOSO: train probe on 8 subjects' T, test on held-out E.
 
   2a: 22 EEG channels, 250 Hz, 4 classes (left hand, right hand, feet, tongue)
   2b:  3 EEG channels, 250 Hz, 2 classes (left hand, right hand)
 
 Usage:
-  python evaluate_bci.py --checkpoint checkpoints/bci_2a_theta/best_model.pth --bci 2a
-  python evaluate_bci.py --checkpoint checkpoints/bci_2b_theta/best_model.pth --bci 2b --preset bci_2b
+  python evaluate_bci.py --checkpoint best_model.pth --bci 2a --mode within
+  python evaluate_bci.py --checkpoint best_model.pth --bci 2a --mode loso
+  python evaluate_bci.py --checkpoint random --bci 2a --mode within   # random baseline
 """
 
 import os, argparse
@@ -29,6 +30,7 @@ from train import PRESETS, BCI_2A_PATH, BCI_2B_PATH
 class FrozenBackbone(nn.Module):
     def __init__(self, n_channels, sampling_rate, embed_dim, n_layers, n_heads, mlp_dim):
         super().__init__()
+        self.n_channels = n_channels
         self.tfe = TimeFrequencyEmbedding(n_channels, sampling_rate, embed_dim)
         self.dpe = DecoupledPositionalEmbedding(n_channels, embed_dim)
         self.transformer = EEGTransformer(embed_dim, n_layers, n_heads, mlp_dim)
@@ -39,6 +41,14 @@ class FrozenBackbone(nn.Module):
         if channel_indices is None:
             channel_indices = torch.arange(x.shape[1], device=x.device)
             channel_indices = channel_indices.unsqueeze(0).expand(x.shape[0], -1)
+        # Mirror StudentModel: if input has fewer channels than model expects,
+        # scatter into a zero tensor at the correct channel positions.
+        if x.shape[1] < self.n_channels:
+            ci = channel_indices[0].clamp(0, self.n_channels - 1)
+            full = torch.zeros(x.shape[0], self.n_channels, x.shape[2],
+                               device=x.device, dtype=x.dtype)
+            full[:, ci, :] = x
+            x = full
         tokens, _ = self.tfe(x)
         tokens = self.dpe(tokens, channel_indices)
         cls, _ = self.transformer(tokens)
@@ -251,6 +261,37 @@ def load_subject_2b(root, sid, nc, sr, td):
 
 
 # ─────────────────────────────────────────────────────────────
+# Within-subject: train probe on T, test on E, per subject
+# ─────────────────────────────────────────────────────────────
+
+def eval_within_subject(backbone, bci, cfg, args):
+    nc, sr, td = cfg['n_channels'], cfg['sampling_rate'], args.trial_duration
+    device = next(backbone.parameters()).device
+
+    if bci == '2a':
+        subjects = [f'A{s:02d}' for s in range(1, 10)]
+    else:
+        subjects = [f'B{s:02d}' for s in range(1, 10)]
+
+    results = []
+    for sid in subjects:
+        print(f"\n--- Within-subject: {sid} ---")
+        if bci == '2a':
+            train_ds, test_ds = load_subject_2a(BCI_2A_PATH, sid, nc, sr, td)
+        else:
+            train_ds, test_ds = load_subject_2b(BCI_2B_PATH, sid, nc, sr, td)
+
+        print(f"  Train: {len(train_ds)} trials (T) | Test: {len(test_ds)} trials (E)")
+        acc, f1, kappa = train_and_eval(
+            backbone, train_ds, test_ds, cfg['embed_dim'], device,
+            args.probe_epochs, args.probe_lr)
+        print(f"  Acc: {acc:.4f} | F1: {f1:.4f} | Kappa: {kappa:.4f}")
+        results.append({'subject': sid, 'acc': acc, 'f1': f1, 'kappa': kappa})
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────
 # LOSO: train probe on 8 subj T sessions, test on held-out E session
 # ─────────────────────────────────────────────────────────────
 
@@ -319,11 +360,14 @@ def eval_loso(backbone, bci, cfg, args):
 # ─────────────────────────────────────────────────────────────
 
 def main():
-    p = argparse.ArgumentParser(description='EEG-DINO BCI Evaluation (LOSO)')
-    p.add_argument('--checkpoint', required=True)
+    p = argparse.ArgumentParser(description='EEG-DINO BCI Evaluation')
+    p.add_argument('--checkpoint', required=True,
+                   help='Path to checkpoint, or "random" for untrained baseline')
     p.add_argument('--bci', required=True, choices=['2a', '2b'])
     p.add_argument('--preset', default='bci_2a', choices=['tiny', 'bci_2a', 'bci_2b'],
                    help='Model config matching pretraining preset')
+    p.add_argument('--mode', default='within', choices=['within', 'loso'],
+                   help='within = per-subject T→E, loso = cross-subject')
     p.add_argument('--probe_epochs', type=int, default=100)
     p.add_argument('--probe_lr', type=float, default=1e-3)
     p.add_argument('--trial_duration', type=float, default=4.0)
@@ -336,27 +380,36 @@ def main():
         cfg['n_channels'], cfg['sampling_rate'],
         cfg['embed_dim'], cfg['n_layers'], cfg['n_heads'], cfg['mlp_dim']
     ).to(device)
-    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=True)
-    bb_sd = {}
-    for k, v in ckpt['student'].items():
-        for prefix in ('tfe.', 'dpe.', 'transformer.'):
-            if k.startswith(prefix):
-                bb_sd[k] = v
-                break
-    backbone.load_state_dict(bb_sd, strict=True)
-    print(f"Loaded backbone from {args.checkpoint} (epoch {ckpt.get('epoch', '?')})")
-    print(f"LOSO | BCI-IV {args.bci} | preset: {args.preset}")
+
+    if args.checkpoint == 'random':
+        print("Using RANDOM (untrained) backbone as baseline")
+    else:
+        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=True)
+        bb_sd = {}
+        for k, v in ckpt['student'].items():
+            for prefix in ('tfe.', 'dpe.', 'transformer.'):
+                if k.startswith(prefix):
+                    bb_sd[k] = v
+                    break
+        backbone.load_state_dict(bb_sd, strict=True)
+        print(f"Loaded backbone from {args.checkpoint} (epoch {ckpt.get('epoch', '?')})")
+
+    mode_label = 'WITHIN-SUBJECT' if args.mode == 'within' else 'LOSO'
+    print(f"{mode_label} | BCI-IV {args.bci} | preset: {args.preset}")
     print(f"  n_channels={cfg['n_channels']}, sampling_rate={cfg['sampling_rate']}Hz, "
           f"trial_duration={args.trial_duration}s\n")
 
-    results = eval_loso(backbone, args.bci, cfg, args)
+    if args.mode == 'within':
+        results = eval_within_subject(backbone, args.bci, cfg, args)
+    else:
+        results = eval_loso(backbone, args.bci, cfg, args)
 
     # Summary
     accs = [r['acc'] for r in results]
     f1s = [r['f1'] for r in results]
     kappas = [r['kappa'] for r in results]
     print(f"\n{'='*50}")
-    print(f"BCI-IV {args.bci} -- LOSO -- {len(results)} subjects")
+    print(f"BCI-IV {args.bci} -- {mode_label} -- {len(results)} subjects")
     print(f"  Accuracy : {np.mean(accs):.4f} +/- {np.std(accs):.4f}")
     print(f"  F1 Macro : {np.mean(f1s):.4f} +/- {np.std(f1s):.4f}")
     print(f"  Kappa    : {np.mean(kappas):.4f} +/- {np.std(kappas):.4f}")
