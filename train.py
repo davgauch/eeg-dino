@@ -1,4 +1,4 @@
-"""EEG-DINO Pre-Training on Sleep-EDF (+ optional BCI-IV 2a/2b)."""
+"""EEG-DINO Pre-Training on Sleep-EDF and BCI-IV datasets."""
 
 import os, math, argparse, random
 import torch
@@ -20,12 +20,10 @@ CONFIG = dict(
     embed_dim=64, n_layers=2, n_heads=4, mlp_dim=128,
     out_dim=4096, head_hidden_dim=256, head_bottleneck_dim=64,
     n_local_views=4, n_masked_views=1, batch_size=64,
-    learning_rate=1.25e-4,       # DINO scaling: 5e-4 × 64/256
-    warmup_epochs=10,
+    learning_rate=1.25e-4, warmup_epochs=10,
     weight_decay_start=0.04, weight_decay_end=0.40,
     momentum_start=0.996, momentum_end=1.0,
-    n_epochs=100,
-    mask_strategy='alpha',
+    n_epochs=100, mask_strategy='alpha',
 )
 
 CONFIG_BCI_2A = dict(
@@ -33,12 +31,10 @@ CONFIG_BCI_2A = dict(
     embed_dim=64, n_layers=2, n_heads=4, mlp_dim=128,
     out_dim=4096, head_hidden_dim=256, head_bottleneck_dim=64,
     n_local_views=4, n_masked_views=1, batch_size=64,
-    learning_rate=1.25e-4,
-    warmup_epochs=10,
+    learning_rate=1.25e-4, warmup_epochs=10,
     weight_decay_start=0.04, weight_decay_end=0.40,
     momentum_start=0.996, momentum_end=1.0,
-    n_epochs=100,
-    mask_strategy='alpha',
+    n_epochs=100, mask_strategy='spatiotemporal',
 )
 
 CONFIG_BCI_2B = dict(
@@ -46,16 +42,13 @@ CONFIG_BCI_2B = dict(
     embed_dim=64, n_layers=2, n_heads=4, mlp_dim=128,
     out_dim=4096, head_hidden_dim=256, head_bottleneck_dim=64,
     n_local_views=4, n_masked_views=1, batch_size=64,
-    learning_rate=1.25e-4,
-    warmup_epochs=10,
+    learning_rate=1.25e-4, warmup_epochs=10,
     weight_decay_start=0.04, weight_decay_end=0.40,
     momentum_start=0.996, momentum_end=1.0,
-    n_epochs=100,
-    mask_strategy='alpha',
+    n_epochs=100, mask_strategy='spatiotemporal',
 )
 
 PRESETS = {'tiny': CONFIG, 'bci_2a': CONFIG_BCI_2A, 'bci_2b': CONFIG_BCI_2B}
-
 
 
 class SleepEDFDataset(Dataset):
@@ -80,11 +73,9 @@ class SleepEDFDataset(Dataset):
                 label = int(os.path.basename(os.path.dirname(fp)))
                 t = torch.load(fp, map_location='cpu', weights_only=True).float()
 
-                # Resample 100→200 Hz
                 t = F.interpolate(t.unsqueeze(0), size=self.epoch_len,
                                   mode='linear', align_corners=False).squeeze(0)
 
-                # Z-score per epoch
                 real = t[:min(t.shape[0], n_channels)]
                 t = (t - real.mean()) / (real.std() + 1e-8)
                 if t.shape[0] >= n_channels:
@@ -107,11 +98,7 @@ class SleepEDFDataset(Dataset):
 
 
 class BCIDataset(Dataset):
-    """BCI Competition IV 2a/2b for self-supervised pretraining.
-
-    Loads raw GDF files via MNE, keeps all EEG channels (excludes EOG).
-    Only loads T (training) sessions by default to avoid test data leakage.
-    """
+    """BCI dataset using sliding windows over entire sessions (includes non-MI periods)."""
 
     def __init__(self, root, dataset='2a', n_channels=22, sampling_rate=250,
                  epoch_duration=6, sessions='T'):
@@ -131,10 +118,10 @@ class BCIDataset(Dataset):
         self.windows = []
         for fp in tqdm(gdf_files, desc=f"BCI-{dataset}"):
             try:
-                raw = mne.io.read_raw_gdf(fp, preload=True)
-                eeg_idx = [i for i, ch in enumerate(raw.ch_names)
-                           if 'EOG' not in ch]
-                raw.pick(eeg_idx)
+                raw = mne.io.read_raw_gdf(fp, preload=True, verbose=False)
+                raw.pick_types(eeg=True, exclude=[])
+                if len(raw.ch_names) > n_channels:
+                    raw.pick(raw.ch_names[:n_channels])
                 if raw.info['sfreq'] != sampling_rate:
                     raw.resample(sampling_rate)
 
@@ -151,8 +138,7 @@ class BCIDataset(Dataset):
                 print(f"  Skip {fp}: {e}")
 
         n_ch = self.windows[0].shape[0] if self.windows else '?'
-        print(f"  → {len(self.windows)} windows ({n_ch} ch, {epoch_duration}s, "
-              f"{len(self.windows) * epoch_duration / 60:.0f} min)")
+        print(f"  → {len(self.windows)} windows ({n_ch} ch, {epoch_duration}s)")
 
     def __len__(self):
         return len(self.windows)
@@ -168,15 +154,75 @@ class BCIDataset(Dataset):
         return torch.cat([window, pad], dim=0)
 
 
+class BCITrialBasedDataset(Dataset):
+    """BCI dataset extracting only clean motor imagery periods using event markers.
+    
+    Eliminates contamination from fixation, cue, break, and inter-trial periods.
+    """
+
+    def __init__(self, gdf_paths, n_channels, sampling_rate, epoch_duration,
+                 mi_offset=2.0):
+        import mne
+        mne.set_log_level('WARNING')
+        
+        self.n_channels = n_channels
+        self.sampling_rate = sampling_rate
+        self.epoch_duration = epoch_duration
+        self.samples_per_epoch = int(epoch_duration * sampling_rate)
+        self.trials = []
+        
+        for gdf_path in tqdm(gdf_paths, desc="Loading BCI trials"):
+            try:
+                raw = mne.io.read_raw_gdf(gdf_path, preload=True, verbose=False)
+                raw.pick_types(eeg=True, exclude=[])
+                if len(raw.ch_names) > n_channels:
+                    raw.pick(raw.ch_names[:n_channels])
+                if raw.info['sfreq'] != sampling_rate:
+                    raw.resample(sampling_rate)
+                
+                signal = raw.get_data()
+                
+                events, _ = mne.events_from_annotations(raw, verbose=False)
+                trial_starts = events[events[:, 2] == 768][:, 0]
+                
+                mi_start_offset = int(mi_offset * sampling_rate)
+                
+                for trial_start in trial_starts:
+                    mi_start = trial_start + mi_start_offset
+                    mi_end = mi_start + self.samples_per_epoch
+                    
+                    if mi_end <= signal.shape[1]:
+                        trial_data = signal[:, mi_start:mi_end]
+                        if not np.isnan(trial_data).any():
+                            trial_data = (trial_data - trial_data.mean()) / (trial_data.std() + 1e-8)
+                            self.trials.append(torch.from_numpy(trial_data).float())
+            except Exception as e:
+                print(f"  Skip {gdf_path}: {e}")
+        
+        print(f"  → {len(self.trials)} clean MI trials ({n_channels} ch, {epoch_duration}s)")
+
+    def __len__(self):
+        return len(self.trials)
+
+    def __getitem__(self, idx):
+        trial = self.trials[idx]
+        n_ch = trial.shape[0]
+        if n_ch == self.n_channels:
+            return trial
+        if n_ch > self.n_channels:
+            return trial[:self.n_channels]
+        pad = torch.zeros(self.n_channels - n_ch, trial.shape[1])
+        return torch.cat([trial, pad], dim=0)
+
+
 class UnlabeledWrapper(Dataset):
-    """Strip labels for self-supervised pre-training."""
     def __init__(self, ds):
         self.ds = ds
     def __len__(self):
         return len(self.ds)
     def __getitem__(self, idx):
-        return self.ds[idx][0]
-
+        x = self.ds[idx]
+        return x[0] if isinstance(x, (list, tuple)) else x
 
 
 def cosine_schedule(base, final, total, step):
@@ -187,7 +233,6 @@ def warmup_cosine_lr(base_lr, warmup, total, step):
     if step < warmup:
         return base_lr * step / max(1, warmup)
     return base_lr * 0.5 * (1 + math.cos(math.pi * (step - warmup) / (total - warmup)))
-
 
 
 class EEGDINOTrainer:
@@ -286,8 +331,6 @@ class EEGDINOTrainer:
         diag = {'s_std': 0., 't_std': 0., 'c_norm': 0., 'grad_norm': 0.}
 
         for x in loader:
-            if isinstance(x, (list, tuple)):
-                x = x[0]
             self._update_schedules()
             self.step += 1
 
@@ -330,8 +373,6 @@ class EEGDINOTrainer:
         tot, sig_t, pat_t = 0., 0., 0.
 
         for x in loader:
-            if isinstance(x, (list, tuple)):
-                x = x[0]
             s_out, t_out, s_pat, t_pat = self._forward(x)
             l_sig, _ = self.signal_loss_fn(s_out, t_out, self.teacher.center)
             l_pat = self.patch_loss_fn(s_pat, t_pat, self.teacher.patch_center)
@@ -358,8 +399,8 @@ class EEGDINOTrainer:
         self.total_steps = spe * self.n_epochs
         self.step = 0
 
-        print(f"\nEpochs: {self.n_epochs} | Steps/epoch: {spe} | "
-              f"Total: {self.total_steps} | LR: {self.base_lr} | BS: {self.batch_size}")
+        print(f"Epochs: {self.n_epochs} | Steps/epoch: {spe} | "
+              f"Total: {self.total_steps} | LR: {self.base_lr} | BS: {self.batch_size}\n")
 
         collapse_threshold = math.log(self.signal_loss_fn.out_dim)
         best = float('inf')
@@ -377,7 +418,7 @@ class EEGDINOTrainer:
                   f" c_norm:{d['c_norm']:.4f} grad:{d['grad_norm']:.4f}")
 
             if tr['signal'] > 0.95 * collapse_threshold:
-                print(f"  ⚠ COLLAPSE WARNING: sig_loss={tr['signal']:.4f} ~ {collapse_threshold:.2f} (uniform)")
+                print(f"  ⚠ COLLAPSE WARNING: sig_loss={tr['signal']:.4f} ~ {collapse_threshold:.2f}")
             if d['s_std'] < 1e-4:
                 print(f"  ⚠ STUDENT OUTPUTS COLLAPSED: std={d['s_std']:.8f}")
 
@@ -400,26 +441,24 @@ class EEGDINOTrainer:
         print(f"\nDone! Best loss: {best:.4f} → {save_dir}/")
 
 
-
 def main():
     p = argparse.ArgumentParser(description='EEG-DINO Pre-Training')
-    p.add_argument('--max_train', type=int, default=None, help='Limit training samples')
-    p.add_argument('--max_val', type=int, default=None, help='Limit validation samples')
+    p.add_argument('--max_train', type=int, default=None)
+    p.add_argument('--max_val', type=int, default=None)
     p.add_argument('--n_epochs', type=int, default=None)
     p.add_argument('--batch_size', type=int, default=None)
     p.add_argument('--lr', type=float, default=None)
     p.add_argument('--save_dir', default='checkpoints')
     p.add_argument('--mask_strategy', default=None,
-                   help='Frequency masking: band name (alpha), combine with + '
-                        '(alpha+beta), or random/none/all')
-    p.add_argument('--seed', type=int, default=42, help='Random seed')
+                   help='alpha, alpha+beta, random, none, spatiotemporal, all')
+    p.add_argument('--seed', type=int, default=42)
     p.add_argument('--dataset', default='sleep_edf',
-                   choices=['sleep_edf', 'bci_2a', 'bci_2b'],
-                   help='Pretraining dataset')
+                   choices=['sleep_edf', 'bci_2a', 'bci_2b'])
     p.add_argument('--preset', default='tiny', choices=['tiny', 'bci_2a', 'bci_2b'])
+    p.add_argument('--bci_trial_based', action='store_true',
+                   help='Use trial-based extraction (clean MI only) for BCI datasets')
     args = p.parse_args()
 
-    # Reproducibility
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -432,11 +471,10 @@ def main():
     if args.lr:          cfg['learning_rate'] = args.lr
     if args.mask_strategy: cfg['mask_strategy'] = args.mask_strategy
 
-    print(f"EEG-DINO | {args.dataset} | {args.preset}")
-    for k, v in sorted(cfg.items()):
-        print(f"  {k}: {v}")
+    print(f"\n{'='*60}")
+    print(f"EEG-DINO | {args.dataset} | preset: {args.preset}")
+    print(f"{'='*60}")
 
-    # --- Load data based on dataset choice ---
     nc, sr = cfg['n_channels'], cfg['sampling_rate']
     epoch_dur = cfg.get('epoch_duration', 30)
     va_ds = None
@@ -448,15 +486,29 @@ def main():
             SLEEP_EDF_PATH, 'ValidFold', nc, sr, args.max_val))
 
     elif args.dataset == 'bci_2a':
-        tr_ds = BCIDataset(BCI_2A_PATH, '2a', nc, sr,
-                           epoch_duration=epoch_dur, sessions='T')
+        from glob import glob
+        if args.bci_trial_based:
+            gdf_paths = sorted(glob(os.path.join(BCI_2A_PATH, '*T.gdf')))
+            tr_ds = BCITrialBasedDataset(gdf_paths, nc, sr, epoch_dur, mi_offset=2.0)
+        else:
+            tr_ds = BCIDataset(BCI_2A_PATH, '2a', nc, sr, epoch_dur, sessions='T')
 
     elif args.dataset == 'bci_2b':
-        tr_ds = BCIDataset(BCI_2B_PATH, '2b', nc, sr,
-                           epoch_duration=epoch_dur, sessions='T')
+        from glob import glob
+        if args.bci_trial_based:
+            sessions = ['01T', '02T', '03T']
+            gdf_paths = []
+            for i in range(1, 10):
+                for s in sessions:
+                    path = os.path.join(BCI_2B_PATH, f'B{i:02d}{s}.gdf')
+                    if os.path.exists(path):
+                        gdf_paths.append(path)
+            tr_ds = BCITrialBasedDataset(gdf_paths, nc, sr, epoch_dur, mi_offset=3.0)
+        else:
+            tr_ds = BCIDataset(BCI_2B_PATH, '2b', nc, sr, epoch_dur, sessions='T')
 
     val_str = f" | Val: {len(va_ds)}" if va_ds else ""
-    print(f"Train: {len(tr_ds)}{val_str}")
+    print(f"Train: {len(tr_ds)}{val_str}\n")
 
     cuda = cfg['device'] != 'cpu'
     tr_loader = DataLoader(tr_ds, cfg['batch_size'], shuffle=True,
@@ -466,9 +518,7 @@ def main():
         va_loader = DataLoader(va_ds, cfg['batch_size'], shuffle=False,
                                num_workers=4, pin_memory=cuda)
 
-    # Filter out data-only keys before passing to trainer
-    _data_keys = {'epoch_duration'}
-    trainer_cfg = {k: v for k, v in cfg.items() if k not in _data_keys}
+    trainer_cfg = {k: v for k, v in cfg.items() if k != 'epoch_duration'}
     trainer = EEGDINOTrainer(**trainer_cfg)
     trainer.train(tr_loader, va_loader, save_dir=args.save_dir)
 
