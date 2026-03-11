@@ -451,6 +451,14 @@ def main():
     # ========================================
     # END DIAGNOSTIC PRINTS
     # ========================================
+
+
+    mode_label = 'WITHIN-SUBJECT' if args.mode == 'within' else 'LOSO'
+    print(f"\n{mode_label} | BCI-IV {args.bci} | preset: {args.preset}")
+    print(f"  n_channels={cfg['n_channels']}, sampling_rate={cfg['sampling_rate']}Hz")
+    print(f"  trial_duration={args.trial_duration}s, mi_offset={mi_offset}s")
+    print(f"  → Extracting [{mi_offset}, {mi_offset + args.trial_duration}]s from event 768\n")
+
     if args.mode == 'within':
         results = eval_within_subject(backbone, args.bci, cfg, args, mi_offset)
     else:
