@@ -179,27 +179,45 @@ class BCITrialBasedDataset(Dataset):
                 
                 signal = raw.get_data()
                 
-                # Try direct event extraction first (more reliable for GDF)
-                events = mne.find_events(raw, shortest_event=0, verbose=False)
+                # Use annotations to get events (GDF files store events as annotations)
+                events, event_id = mne.events_from_annotations(raw, verbose=False)
                 
-                # Look for trial start events (768) or cue onset events (769-772)
-                # If 768 not found, use cue onset events as trial markers
-                trial_events = events[events[:, 2] == 768]
+                # Find trial start events (event code 768 = 0x300)
+                # event_id maps annotation descriptions to integer codes
+                trial_start_key = None
+                for key, code in event_id.items():
+                    if '768' in str(code) or 'T0' in key or code == 768:
+                        trial_start_key = key
+                        break
                 
-                if len(trial_events) == 0:
-                    # Fallback: use any cue onset event (769, 770, 771, 772)
-                    cue_events = events[np.isin(events[:, 2], [769, 770, 771, 772])]
-                    if len(cue_events) > 0:
-                        # Cue appears at t=2s after trial start, so subtract offset
-                        trial_events = cue_events.copy()
-                        trial_events[:, 0] -= int(2.0 * sampling_rate)  # Move back to trial start
+                if trial_start_key is None:
+                    # Fallback: look for cue onset events (769-772)
+                    cue_keys = [k for k, v in event_id.items() 
+                               if any(x in str(v) or x in k for x in ['769', '770', '771', '772', 'T1', 'T2'])]
+                    
+                    if cue_keys:
+                        # Use cue events but adjust timing (cue at t=2s after trial start)
+                        trial_events = []
+                        for key in cue_keys:
+                            cue_events = events[events[:, 2] == event_id[key]]
+                            for evt in cue_events:
+                                # Subtract 2s to get trial start
+                                trial_start = evt[0] - int(2.0 * sampling_rate)
+                                if trial_start >= 0:
+                                    trial_events.append(trial_start)
+                        trial_starts = np.array(trial_events)
+                    else:
+                        print(f"  Warning: No trial/cue events in {os.path.basename(gdf_path)}")
+                        print(f"    Available events: {event_id}")
+                        continue
+                else:
+                    trial_events = events[events[:, 2] == event_id[trial_start_key]]
+                    trial_starts = trial_events[:, 0]
                 
-                if len(trial_events) == 0:
-                    print(f"  Warning: No trial events found in {os.path.basename(gdf_path)}")
-                    print(f"    Available events: {np.unique(events[:, 2])}")
+                if len(trial_starts) == 0:
+                    print(f"  Warning: No trials found in {os.path.basename(gdf_path)}")
                     continue
                 
-                trial_starts = trial_events[:, 0]
                 mi_start_offset = int(mi_offset * sampling_rate)
                 
                 for trial_start in trial_starts:
@@ -212,7 +230,9 @@ class BCITrialBasedDataset(Dataset):
                             trial_data = (trial_data - trial_data.mean()) / (trial_data.std() + 1e-8)
                             self.trials.append(torch.from_numpy(trial_data).float())
             except Exception as e:
-                print(f"  Skip {gdf_path}: {e}")
+                print(f"  Error in {os.path.basename(gdf_path)}: {e}")
+                import traceback
+                traceback.print_exc()
         
         print(f"  → {len(self.trials)} clean MI trials ({n_channels} ch, {epoch_duration}s)")
 
