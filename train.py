@@ -181,7 +181,9 @@ class BCITrialBasedDataset(Dataset):
                 
                 # Use annotations to get events (GDF files store events as annotations)
                 events, event_id = mne.events_from_annotations(raw, verbose=False)
-                
+                print(f"File: {os.path.basename(gdf_path)}")
+                print(f"  event_id: {event_id}")
+                print(f"  annotations: {[a['description'] for a in raw.annotations]}")
                 # Find trial start events (event code 768 = 0x300)
                 # event_id maps annotation descriptions to integer codes
                 trial_start_key = None
