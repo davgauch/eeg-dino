@@ -155,10 +155,7 @@ class BCIDataset(Dataset):
 
 
 class BCITrialBasedDataset(Dataset):
-    """BCI dataset extracting only clean motor imagery periods using event markers.
-    
-    Eliminates contamination from fixation, cue, break, and inter-trial periods.
-    """
+    """BCI dataset extracting only clean motor imagery periods using event markers."""
 
     def __init__(self, gdf_paths, n_channels, sampling_rate, epoch_duration,
                  mi_offset=2.0):
@@ -182,16 +179,34 @@ class BCITrialBasedDataset(Dataset):
                 
                 signal = raw.get_data()
                 
-                events, _ = mne.events_from_annotations(raw, verbose=False)
-                trial_starts = events[events[:, 2] == 768][:, 0]
+                # Try direct event extraction first (more reliable for GDF)
+                events = mne.find_events(raw, shortest_event=0, verbose=False)
                 
+                # Look for trial start events (768) or cue onset events (769-772)
+                # If 768 not found, use cue onset events as trial markers
+                trial_events = events[events[:, 2] == 768]
+                
+                if len(trial_events) == 0:
+                    # Fallback: use any cue onset event (769, 770, 771, 772)
+                    cue_events = events[np.isin(events[:, 2], [769, 770, 771, 772])]
+                    if len(cue_events) > 0:
+                        # Cue appears at t=2s after trial start, so subtract offset
+                        trial_events = cue_events.copy()
+                        trial_events[:, 0] -= int(2.0 * sampling_rate)  # Move back to trial start
+                
+                if len(trial_events) == 0:
+                    print(f"  Warning: No trial events found in {os.path.basename(gdf_path)}")
+                    print(f"    Available events: {np.unique(events[:, 2])}")
+                    continue
+                
+                trial_starts = trial_events[:, 0]
                 mi_start_offset = int(mi_offset * sampling_rate)
                 
                 for trial_start in trial_starts:
                     mi_start = trial_start + mi_start_offset
                     mi_end = mi_start + self.samples_per_epoch
                     
-                    if mi_end <= signal.shape[1]:
+                    if mi_end <= signal.shape[1] and mi_start >= 0:
                         trial_data = signal[:, mi_start:mi_end]
                         if not np.isnan(trial_data).any():
                             trial_data = (trial_data - trial_data.mean()) / (trial_data.std() + 1e-8)
@@ -213,7 +228,6 @@ class BCITrialBasedDataset(Dataset):
             return trial[:self.n_channels]
         pad = torch.zeros(self.n_channels - n_ch, trial.shape[1])
         return torch.cat([trial, pad], dim=0)
-
 
 class UnlabeledWrapper(Dataset):
     def __init__(self, ds):
