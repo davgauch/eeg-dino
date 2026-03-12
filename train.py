@@ -29,7 +29,7 @@ CONFIG = dict(
 
 CONFIG_BCI_2A = dict(
     n_channels=22, sampling_rate=250, epoch_duration=4,
-    embed_dim=64, n_layers=4, n_heads=8, mlp_dim=512,
+    embed_dim=128, n_layers=4, n_heads=8, mlp_dim=512,
     out_dim=4096, head_hidden_dim=256, head_bottleneck_dim=64,
     n_local_views=4, n_masked_views=1, batch_size=32,
     learning_rate=1.25e-4, warmup_epochs=10,

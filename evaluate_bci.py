@@ -109,7 +109,7 @@ class BCITrialDataset(Dataset):
                 pad = torch.zeros(n_channels - trial.shape[0], trial_samples)
                 trial = torch.cat([trial, pad], dim=0)
 
-            trial = (trial - trial.mean(axis=1, keepdim=True)) / (trial.std(axis=1, keepdim=True) + 1e-8)
+            trial = (trial - trial.mean(dim=1, keepdim=True)) / (trial.std(dim=1, keepdim=True) + 1e-8)
             self.data.append(trial)
             self.labels.append(label)
 
