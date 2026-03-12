@@ -6,6 +6,7 @@ import torch.nn as nn
 import numpy as np
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
+import scipy.io 
 
 from eeg_dino_model import StudentModel, TeacherModel
 from channel_aware_sampling import ChannelAwareSampling
@@ -160,6 +161,7 @@ class BCITrialBasedDataset(Dataset):
     def __init__(self, gdf_paths, n_channels, sampling_rate, epoch_duration,
                  mi_offset=2.0):
         import mne
+        import scipy.io
         mne.set_log_level('WARNING')
         
         self.n_channels = n_channels
@@ -170,6 +172,11 @@ class BCITrialBasedDataset(Dataset):
         
         for gdf_path in tqdm(gdf_paths, desc="Loading BCI trials"):
             try:
+                mat_path = gdf_path.replace('.gdf', '.mat')
+                if not os.path.exists(mat_path):
+                    print(f"  Warning: No .mat file for {os.path.basename(gdf_path)}")
+                    continue
+                
                 raw = mne.io.read_raw_gdf(gdf_path, preload=True, verbose=False)
                 raw.pick_types(eeg=True, exclude=[])
                 if len(raw.ch_names) > n_channels:
@@ -179,14 +186,27 @@ class BCITrialBasedDataset(Dataset):
                 
                 signal = raw.get_data()
                 
+                # Extract events - same method as evaluate_bci.py
                 events, event_id = mne.events_from_annotations(raw, verbose=False)
+                
+                # Load .mat file to ensure consistency
+                mat = scipy.io.loadmat(mat_path)
+                labels = mat['classlabel'].flatten().astype(int) - 1
+                
+                # Get event code for trial start (768)
                 onset_code = event_id.get('768')
                 if onset_code is None:
                     print(f"  Warning: Event 768 not found in {os.path.basename(gdf_path)}")
                     print(f"    Available events: {event_id}")
                     continue
                 
+                # Extract trial start times
                 trial_starts = [ev[0] for ev in events if ev[2] == onset_code]
+                
+                if len(trial_starts) != len(labels):
+                    print(f"  Warning: Trial count mismatch in {os.path.basename(gdf_path)}")
+                    print(f"    Events: {len(trial_starts)}, Labels: {len(labels)}")
+                
                 mi_start_offset = int(mi_offset * sampling_rate)
                 
                 for trial_start in trial_starts:
@@ -198,8 +218,12 @@ class BCITrialBasedDataset(Dataset):
                         if not np.isnan(trial_data).any():
                             trial_data = (trial_data - trial_data.mean()) / (trial_data.std() + 1e-8)
                             self.trials.append(torch.from_numpy(trial_data).float())
+                            
             except Exception as e:
-                print(f"  Skip {gdf_path}: {e}")
+                import traceback
+                print(f"  Error loading {os.path.basename(gdf_path)}: {e}")
+                traceback.print_exc()
+                continue
         
         print(f"  → {len(self.trials)} clean MI trials ({n_channels} ch, {epoch_duration}s)")
 
@@ -215,6 +239,7 @@ class BCITrialBasedDataset(Dataset):
             return trial[:self.n_channels]
         pad = torch.zeros(self.n_channels - n_ch, trial.shape[1])
         return torch.cat([trial, pad], dim=0)
+    
 
 class UnlabeledWrapper(Dataset):
     def __init__(self, ds):
