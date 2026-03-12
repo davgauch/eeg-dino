@@ -216,7 +216,7 @@ class BCITrialBasedDataset(Dataset):
                     if mi_end <= signal.shape[1] and mi_start >= 0:
                         trial_data = signal[:, mi_start:mi_end]
                         if not np.isnan(trial_data).any():
-                            trial_data = (trial_data - trial_data.mean()) / (trial_data.std() + 1e-8)
+                            trial_data = (trial_data - trial_data.mean(axis=1, keepdims=True)) / (trial_data.std(axis=1, keepdims=True) + 1e-8)
                             self.trials.append(torch.from_numpy(trial_data).float())
                             
             except Exception as e:

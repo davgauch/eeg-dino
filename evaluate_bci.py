@@ -107,7 +107,7 @@ class BCITrialDataset(Dataset):
                 pad = torch.zeros(n_channels - trial.shape[0], trial_samples)
                 trial = torch.cat([trial, pad], dim=0)
 
-            trial = (trial - trial.mean()) / (trial.std() + 1e-8)
+            trial = (trial - trial.mean(axis=1, keepdim=True)) / (trial.std(axis=1, keepdim=True) + 1e-8)
             self.data.append(trial)
             self.labels.append(label)
 
@@ -321,7 +321,7 @@ def main():
     cfg = PRESETS[args.preset]
 
     if args.trial_duration is None:
-        args.trial_duration = cfg.get('epoch_duration', 6.0)
+        args.trial_duration = cfg.get('epoch_duration', 4.0)
         print(f"Auto-detected trial_duration={args.trial_duration}s from preset "
               f"(matches pretraining epoch_duration)")
 
