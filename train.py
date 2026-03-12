@@ -29,13 +29,13 @@ CONFIG = dict(
 
 CONFIG_BCI_2A = dict(
     n_channels=22, sampling_rate=250, epoch_duration=4,
-    embed_dim=64, n_layers=2, n_heads=4, mlp_dim=128,
+    embed_dim=64, n_layers=4, n_heads=8, mlp_dim=512,
     out_dim=4096, head_hidden_dim=256, head_bottleneck_dim=64,
-    n_local_views=4, n_masked_views=1, batch_size=64,
+    n_local_views=4, n_masked_views=1, batch_size=32,
     learning_rate=1.25e-4, warmup_epochs=10,
     weight_decay_start=0.04, weight_decay_end=0.40,
     momentum_start=0.996, momentum_end=1.0,
-    n_epochs=100, mask_strategy='spatiotemporal',
+    n_epochs=100, mask_strategy='theta',
 )
 
 CONFIG_BCI_2B = dict(

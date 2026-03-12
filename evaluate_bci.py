@@ -27,6 +27,7 @@ class FrozenBackbone(nn.Module):
     def __init__(self, n_channels, sampling_rate, embed_dim, n_layers, n_heads, mlp_dim):
         super().__init__()
         self.n_channels = n_channels
+        self.embed_dim = embed_dim
         self.tfe = TimeFrequencyEmbedding(n_channels, sampling_rate, embed_dim)
         self.dpe = DecoupledPositionalEmbedding(n_channels, embed_dim)
         self.transformer = EEGTransformer(embed_dim, n_layers, n_heads, mlp_dim)
@@ -45,8 +46,9 @@ class FrozenBackbone(nn.Module):
             x = full
         tokens, _ = self.tfe(x)
         tokens = self.dpe(tokens, channel_indices)
-        cls, _ = self.transformer(tokens)
-        return cls
+        cls, patch_tokens = self.transformer(tokens)
+
+        return patch_tokens.flatten(1)
 
 
 def get_mi_offset(bci_type, trial_duration):
@@ -153,8 +155,14 @@ def train_and_eval(backbone, train_ds, test_ds, embed_dim, device,
     split = int(0.8 * n)
     train_idx, val_idx = perm[:split], perm[split:]
 
+    feature_dim = tr_f.shape[1]
     n_classes = int(tr_y.max().item()) + 1
-    probe = nn.Linear(embed_dim, n_classes).to(device)
+    
+    probe = nn.Sequential(
+        nn.Dropout(0.5),
+        nn.Linear(feature_dim, n_classes)
+    ).to(device)
+    
     opt = torch.optim.Adam(probe.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
 
