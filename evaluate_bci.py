@@ -50,37 +50,17 @@ class FrozenBackbone(nn.Module):
 
 
 def get_mi_offset(bci_type, trial_duration):
-    """Calculate MI extraction offset based on official BCI Competition IV timing.
+    """Extract the official motor imagery period.
     
-    Official 2a timing (desc_2a.pdf):
-      t=0s: Event 768 (fixation cross)
-      t=2s: Cue onset (arrow) for 1.25s
-      t=6s: Fixation disappears (end of MI)
-      MI period: [2.0s, 6.0s] = 4s
+    BCI-IV 2a: MI period is [2.0s, 6.0s] from event 768 (4 seconds)
+    BCI-IV 2b: MI period is [3.0s, 7.0s] from event 768 (4 seconds)
     
-    Official 2b timing (desc_2b.pdf):
-      Screening (01T, 02T): Similar to 2a
-      Feedback (03T-05E): t=3s cue, t=7.5s end
-      MI period: [3.0s, 7.0s] or [3.0s, 7.5s]
-    
-    For 6s extraction matching pretraining epoch_duration=6:
-      Extract window that includes trial context (fixation+cue+MI)
-      to match pretraining's sliding windows over mixed content.
+    Always start at cue onset to match training.
     """
     if bci_type == '2a':
-        if trial_duration <= 4.0:
-            return 2.0
-        elif trial_duration <= 5.0:
-            return 1.5
-        else:  
-            return 0.5
+        return 2.0  # Always start at cue onset
     else:  # 2b
-        if trial_duration <= 4.0:
-            return 3.0
-        elif trial_duration <= 5.0:
-            return 2.5
-        else:  
-            return 1.5
+        return 3.0
 
 
 class BCITrialDataset(Dataset):
