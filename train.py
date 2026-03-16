@@ -424,7 +424,6 @@ class EEGDINOTrainer:
 
 def main():
     p = argparse.ArgumentParser(description='EEG-DINO Pre-Training')
-    p.add_argument('--max_val', type=int, default=None)
     p.add_argument('--n_epochs', type=int, default=None)
     p.add_argument('--batch_size', type=int, default=None)
     p.add_argument('--lr', type=float, default=None)
@@ -461,7 +460,7 @@ def main():
         tr_ds = UnlabeledWrapper(SleepEDFDataset(
             SLEEP_EDF_PATH, 'TrainFold', nc, sr))
         va_ds = UnlabeledWrapper(SleepEDFDataset(
-            SLEEP_EDF_PATH, 'ValidFold', nc, sr, args.max_val))
+            SLEEP_EDF_PATH, 'ValidFold', nc, sr))
     
     elif args.dataset == 'bci_2a':
         from glob import glob
