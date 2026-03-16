@@ -21,20 +21,20 @@ class TimeFrequencyEmbedding(nn.Module):
         super().__init__()
         self.n_channels = n_channels
         self.sampling_rate = sampling_rate
-        self.samples_per_token = sampling_rate
+        self.samples_per_token = sampling_rate # each token represents 1 second of data
         self.n_freq_bins = self.FREQ_MAX - self.FREQ_MIN + 1
 
         n_rfft = self.samples_per_token // 2 + 1
         select = torch.zeros(n_rfft, dtype=torch.bool)
-        select[self.FREQ_MIN : self.FREQ_MAX + 1] = True
+        select[self.FREQ_MIN : self.FREQ_MAX + 1] = True # keep bins corresponding to 1..50 Hz
         self.register_buffer('_bin_select', select)
 
-        self.projection = nn.Linear(n_channels * self.n_freq_bins, embed_dim)
+        self.projection = nn.Linear(n_channels * self.n_freq_bins, embed_dim) # from frequency domain features to token embeddings
 
     def extract_psd(self, segment):
-        window = torch.hann_window(segment.shape[-1], device=segment.device)
-        spectrum = torch.fft.rfft(segment * window, dim=-1)
-        psd = (spectrum.real ** 2 + spectrum.imag ** 2) / segment.shape[-1]
+        window = torch.hann_window(segment.shape[-1], device=segment.device) # apply Hann window to each 1-second segment
+        spectrum = torch.fft.rfft(segment * window, dim=-1) # compute frequency spectrum via FFT
+        psd = (spectrum.real ** 2 + spectrum.imag ** 2) / segment.shape[-1] # power spectral density (PSD)
         return torch.log1p(psd[:, :, self._bin_select])
 
     def forward(self, x):

@@ -32,7 +32,7 @@ class DINOHead(nn.Module):
 
     def forward(self, x):
         x = self.mlp(x)
-        x = F.normalize(x, dim=-1, p=2)
+        x = F.normalize(x, dim=-1, p=2) # L2 normalization before projection
         return self.last_layer(x)
 
 
@@ -52,7 +52,7 @@ class EEGTransformer(nn.Module):
 
     def forward(self, x):
         B = x.shape[0]
-        x = torch.cat([self.cls_token.expand(B, -1, -1), x], dim=1)
+        x = torch.cat([self.cls_token.expand(B, -1, -1), x], dim=1) # prepend CLS token
         x = self.norm(self.transformer(x))
         return x[:, 0], x[:, 1:]  # (cls, patches)
 
@@ -82,6 +82,7 @@ class StudentModel(nn.Module):
     def forward(self, x, channel_indices=None, return_patch=False):
         ci = self._resolve_ci(channel_indices)
 
+        # channel-padding 
         if ci is not None and x.shape[1] < self.tfe.n_channels:
             ci = ci.clamp(0, self.tfe.n_channels - 1)
             full = torch.zeros(x.shape[0], self.tfe.n_channels, x.shape[2],
@@ -137,7 +138,6 @@ class TeacherModel(nn.Module):
 
     @torch.no_grad()
     def update_patch_center(self, teacher_patches):
-        """Update patch center from teacher patch tokens [B, T, D] or [N, D]."""
         if teacher_patches.dim() == 3:
             teacher_patches = teacher_patches.reshape(-1, teacher_patches.shape[-1])
         bc = teacher_patches.mean(dim=0, keepdim=True)

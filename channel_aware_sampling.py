@@ -72,16 +72,18 @@ class ChannelAwareSampling:
     def _random_crop(self, x, ch_frac, time_frac, ceil_ch=False):
         B, C, T = x.shape
         
+        # Temporal cropping
         n_t = int(time_frac * T)
         t_start = np.random.randint(0, T - n_t + 1)
         
+        # Channel selection
         if self.use_channel_sampling:
             C_eff = min(C, self.n_channels)
             n_ch = max(1, math.ceil(ch_frac * C_eff) if ceil_ch else int(ch_frac * C_eff))
             n_ch = min(n_ch, C_eff)
             ch_idx = np.sort(np.random.choice(C_eff, n_ch, replace=False))
         else:
-            ch_idx = np.arange(C)
+            ch_idx = np.arange(C) # keep all channels if subsampling is disabled
         
         return x[:, ch_idx, t_start:t_start + n_t], torch.LongTensor(ch_idx)
 
@@ -90,8 +92,8 @@ class ChannelAwareSampling:
         spectrum = torch.fft.rfft(x, dim=-1)
         freqs = torch.fft.rfftfreq(x.shape[-1], d=1.0 / self.sampling_rate)
         mask = (freqs >= low_hz) & (freqs < high_hz)
-        spectrum[:, :, mask] = 0
-        return torch.fft.irfft(spectrum, n=x.shape[-1], dim=-1)
+        spectrum[:, :, mask] = 0 # zero out selected frequency bins
+        return torch.fft.irfft(spectrum, n=x.shape[-1], dim=-1) # convert back to time domain
 
     def _random_bandstop(self, x, ratio=0.20):
         """Zero a random 20% of frequency bins via FFT."""
