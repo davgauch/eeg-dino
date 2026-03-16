@@ -136,6 +136,7 @@ def extract_features(backbone, loader, device):
     backbone.eval()
     feats, labels = [], []
     with torch.no_grad():
+        # run entire dataset through backbone to extract features
         for x, y in loader:
             feats.append(backbone(x.to(device)).cpu())
             labels.append(y)
@@ -147,6 +148,7 @@ def train_and_eval(backbone, train_ds, test_ds, embed_dim, device,
     tr_loader = DataLoader(train_ds, batch_size, shuffle=True, num_workers=0)
     te_loader = DataLoader(test_ds, batch_size, shuffle=False, num_workers=0)
 
+    # extract features once
     tr_f, tr_y = extract_features(backbone, tr_loader, device)
     te_f, te_y = extract_features(backbone, te_loader, device)
 
@@ -158,6 +160,7 @@ def train_and_eval(backbone, train_ds, test_ds, embed_dim, device,
     feature_dim = tr_f.shape[1]
     n_classes = int(tr_y.max().item()) + 1
     
+    # create linear probe with dropout 
     probe = nn.Sequential(
         nn.Dropout(0.5),
         nn.Linear(feature_dim, n_classes)
@@ -190,14 +193,14 @@ def train_and_eval(backbone, train_ds, test_ds, embed_dim, device,
             wait = 0
         else:
             wait += 1
-            if wait >= patience:
-                break
+            if wait >= patience: 
+                break # early stopping
 
     if best_state is not None:
         probe.load_state_dict(best_state)
 
     probe.eval()
-    with torch.no_grad():
+    with torch.no_grad(): # final evaluation on test set
         preds = probe(te_f.to(device)).argmax(1).cpu().numpy()
     gt = te_y.numpy()
     return (accuracy_score(gt, preds),
