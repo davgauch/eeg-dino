@@ -2,7 +2,6 @@
 
 Usage:
   python evaluate.py --checkpoint checkpoints/best_model.pth
-  python evaluate.py --checkpoint checkpoints/best_model.pth --max_samples 5000
 """
 
 import argparse, torch, numpy as np
