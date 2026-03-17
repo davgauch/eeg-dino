@@ -158,9 +158,9 @@ def main():
 
     # Load Sleep-EDF splits
     n_ch, sr = cfg['n_channels'], cfg['sampling_rate']
-    train_ds = SleepEDFDataset(SLEEP_EDF_PATH, 'TrainFold', n_ch, sr, args.max_samples)
-    val_ds   = SleepEDFDataset(SLEEP_EDF_PATH, 'ValidFold', n_ch, sr, args.max_samples)
-    test_ds  = SleepEDFDataset(SLEEP_EDF_PATH, 'TestFold',  n_ch, sr, args.max_samples)
+    train_ds = SleepEDFDataset(SLEEP_EDF_PATH, 'TrainFold', n_ch, sr)
+    val_ds   = SleepEDFDataset(SLEEP_EDF_PATH, 'ValidFold', n_ch, sr)
+    test_ds  = SleepEDFDataset(SLEEP_EDF_PATH, 'TestFold',  n_ch, sr)
 
     train_loader = DataLoader(train_ds, 256, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_ds, 256, num_workers=4)
