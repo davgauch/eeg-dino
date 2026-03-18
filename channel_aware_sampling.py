@@ -13,12 +13,12 @@ import torch
 import numpy as np
 
 
-BAND_RANGES = {
-    'delta': (1, 4),
-    'theta': (4, 8),
-    'alpha': (8, 13),
-    'beta':  (13, 30),
-    'gamma': (30, 50),
+BAND_CONFIGS = {
+    'delta': {'search': (1, 4), 'bandwidth': 1.0},
+    'theta': {'search': (4, 8), 'bandwidth': 1.5},
+    'alpha': {'search': (7, 14), 'bandwidth': 2.0},  # Wider search!
+    'beta':  {'search': (13, 35), 'bandwidth': 3.0},
+    'gamma': {'search': (30, 50), 'bandwidth': 5.0},
 }
 
 ALL_BANDS = list(BAND_RANGES.keys())
@@ -94,6 +94,7 @@ class ChannelAwareSampling:
         mask = (freqs >= low_hz) & (freqs < high_hz)
         spectrum[:, :, mask] = 0 # zero out selected frequency bins
         return torch.fft.irfft(spectrum, n=x.shape[-1], dim=-1) # convert back to time domain
+    
 
     def _random_bandstop(self, x, ratio=0.20):
         """Zero a random 20% of frequency bins via FFT."""
@@ -101,6 +102,48 @@ class ChannelAwareSampling:
         n_bins = spectrum.shape[-1]
         mask = torch.rand(n_bins) < ratio
         spectrum[:, :, mask] = 0
+        return torch.fft.irfft(spectrum, n=x.shape[-1], dim=-1)
+    
+    def _find_peak_frequency(self, x, search_low, search_high):
+        """Find the frequency with maximum power in the search range"""
+        # Compute power spectrum
+        spectrum = torch.fft.rfft(x, dim=-1)
+        power = torch.abs(spectrum) ** 2  # Power = magnitude squared
+
+        power_avg = power.mean(dim=1) 
+        
+        freqs = torch.fft.rfftfreq(x.shape[-1], d=1.0 / self.sampling_rate)
+        
+        search_mask = (freqs >= search_low) & (freqs < search_high)
+        
+        # Find peak within search range for each batch sample
+        peak_freqs = []
+        for b in range(x.shape[0]):
+            power_in_range = power_avg[b, search_mask]
+            if len(power_in_range) == 0:
+                peak_freqs.append((search_low + search_high) / 2)  # Fallback to center
+            else:
+                # Get index of max power within search range
+                local_peak_idx = torch.argmax(power_in_range)
+                # Map back to actual frequency
+                freqs_in_range = freqs[search_mask]
+                peak_freqs.append(freqs_in_range[local_peak_idx].item())
+        
+        return torch.tensor(peak_freqs)
+    
+    def _adaptive_bandstop(self, x, peak_freqs, bandwidth=2.0):
+        """Remove frequencies around individual peak frequencies"""
+        spectrum = torch.fft.rfft(x, dim=-1)
+        freqs = torch.fft.rfftfreq(x.shape[-1], d=1.0 / self.sampling_rate)
+        
+        # Create per-sample masks
+        for b in range(x.shape[0]):
+            peak = peak_freqs[b].item()
+            low = peak - bandwidth
+            high = peak + bandwidth
+            mask = (freqs >= low) & (freqs < high)
+            spectrum[b, :, mask] = 0
+        
         return torch.fft.irfft(spectrum, n=x.shape[-1], dim=-1)
 
     def _spatiotemporal_mask(self, view, ch_ratio=0.5, time_patch_ratio=0.15):
@@ -123,6 +166,7 @@ class ChannelAwareSampling:
                 view[:, :, p * patch_len:(p + 1) * patch_len] = 0
         
         return view
+    
 
     def create_global_view(self, x):
         return self._random_crop(x, 0.7, 0.8, ceil_ch=True)
