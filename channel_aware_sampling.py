@@ -95,8 +95,8 @@ class ChannelAwareSampling:
         spectrum[:, :, mask] = 0 # zero out selected frequency bins
         return torch.fft.irfft(spectrum, n=x.shape[-1], dim=-1) # convert back to time domain
 
-    def _random_bandstop(self, x, ratio=0.20):
-        """Zero a random 20% of frequency bins via FFT."""
+    def _random_bandstop(self, x, ratio=0.06):
+        """Zero a random 6% of frequency bins via FFT."""
         spectrum = torch.fft.rfft(x, dim=-1)
         n_bins = spectrum.shape[-1]
         mask = torch.rand(n_bins) < ratio
