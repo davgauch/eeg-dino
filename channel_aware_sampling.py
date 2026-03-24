@@ -95,12 +95,27 @@ class ChannelAwareSampling:
         spectrum[:, :, mask] = 0 # zero out selected frequency bins
         return torch.fft.irfft(spectrum, n=x.shape[-1], dim=-1) # convert back to time domain
 
-    def _random_bandstop(self, x, ratio=0.06):
-        """Zero a random 6% of frequency bins via FFT."""
+    def _random_bandstop_constrained(self, x, ratio=0.08):
+        """Zero random frequency bins within physiological range (1-50 Hz).
+        
+        This ensures fair comparison with targeted masking strategies that
+        operate within specific frequency bands.
+        """
         spectrum = torch.fft.rfft(x, dim=-1)
-        n_bins = spectrum.shape[-1]
-        mask = torch.rand(n_bins) < ratio
-        spectrum[:, :, mask] = 0
+        freqs = torch.fft.rfftfreq(x.shape[-1], d=1.0 / self.sampling_rate)
+        
+        # Constrain to physiological range (1-50 Hz, matching TFE)
+        phys_mask = (freqs >= 1) & (freqs <= 50)
+        phys_bins = torch.where(phys_mask)[0]
+        
+        # Randomly select ratio% of bins in this range
+        n_mask = max(1, int(ratio * len(phys_bins)))
+        
+        # Create mask for each sample in batch (different random selection per sample)
+        for b in range(x.shape[0]):
+            mask_indices = phys_bins[torch.randperm(len(phys_bins))[:n_mask]]
+            spectrum[b, :, mask_indices] = 0
+        
         return torch.fft.irfft(spectrum, n=x.shape[-1], dim=-1)
 
     def _spatiotemporal_mask(self, view, ch_ratio=0.5, time_patch_ratio=0.15):
@@ -138,7 +153,7 @@ class ChannelAwareSampling:
                 low, high = BAND_RANGES[band]
                 view = self._bandstop(view, low, high)
         elif self.mask_strategy == 'random':
-            view = self._random_bandstop(view)
+            view = self._random_bandstop_constrained(view, ratio=0.08)
         elif self.mask_strategy == 'spatiotemporal':
             view = self._spatiotemporal_mask(view)
         

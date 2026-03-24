@@ -21,7 +21,7 @@ def train_model(strategy, seed, save_dir, n_epochs):
     """Train a single model with given strategy and seed."""
     cmd = [
         'python', 'train.py',
-        '--preset', 'tiny',           # Sleep-EDF preset (2 channels, 200Hz)
+        '--preset', 'tiny',
         '--dataset', 'sleep_edf',
         '--mask_strategy', strategy,
         '--seed', str(seed),
@@ -34,7 +34,6 @@ def train_model(strategy, seed, save_dir, n_epochs):
     print(f"Command: {' '.join(cmd)}")
     print(f"{'='*60}")
     
-    # Set MKL threading layer to avoid conflicts
     env = os.environ.copy()
     env['MKL_THREADING_LAYER'] = 'GNU'
     
@@ -44,7 +43,6 @@ def train_model(strategy, seed, save_dir, n_epochs):
         print(f"❌ Training FAILED for {strategy} seed {seed}")
         return False
     
-    # Verify checkpoint was created
     checkpoint = os.path.join(save_dir, 'best_model.pth')
     if not os.path.exists(checkpoint):
         print(f"❌ Checkpoint not created: {checkpoint}")
@@ -61,7 +59,7 @@ def evaluate_model(checkpoint, strategy, seed):
         'python', 'evaluate.py',
         '--checkpoint', checkpoint,
         '--preset', 'tiny',
-        '--n_classes', '5',           # Sleep stages: Wake, N1, N2, N3, REM
+        '--n_classes', '5',
         '--probe_epochs', '50',
         '--probe_lr', '1e-3'
     ]
@@ -70,11 +68,9 @@ def evaluate_model(checkpoint, strategy, seed):
     print(f"Evaluating: {strategy} | Seed {seed}")
     print(f"{'='*60}")
     
-    # Set MKL threading layer
     env = os.environ.copy()
     env['MKL_THREADING_LAYER'] = 'GNU'
     
-    # Run and capture output
     result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     
     if result.returncode != 0:
@@ -82,12 +78,10 @@ def evaluate_model(checkpoint, strategy, seed):
         print(f"STDERR:\n{result.stderr}")
         return None
     
-    # Parse output to extract metrics
     lines = result.stdout.split('\n')
     metrics = {}
     
     for line in lines:
-        # Look for metrics in the summary section
         if 'Accuracy :' in line:
             match = re.search(r'Accuracy\s*:\s*([\d.]+)', line)
             if match:
@@ -128,10 +122,7 @@ def run_paired_test(results_a, results_b, metric='accuracy'):
         scores_a = scores_a[:min_len]
         scores_b = scores_b[:min_len]
     
-    # Paired t-test
     t_stat, p_value = stats.ttest_rel(scores_a, scores_b)
-    
-    # Wilcoxon signed-rank test (non-parametric alternative)
     w_stat, w_pvalue = stats.wilcoxon(scores_a, scores_b)
     
     return {
@@ -148,13 +139,12 @@ def run_paired_test(results_a, results_b, metric='accuracy'):
 
 
 def main():
-    # Set MKL threading layer globally
     os.environ['MKL_THREADING_LAYER'] = 'GNU'
     
     parser = argparse.ArgumentParser(
         description='Multi-seed significance testing for Sleep-EDF')
     parser.add_argument('--strategies', nargs='+', required=True,
-                       help='Masking strategies to compare (e.g., spatiotemporal theta)')
+                       help='Masking strategies to compare')
     parser.add_argument('--seeds', type=int, default=5,
                        help='Number of random seeds to run')
     parser.add_argument('--start_seed', type=int, default=42,
@@ -163,17 +153,16 @@ def main():
                        help='Number of pre-training epochs')
     parser.add_argument('--skip_training', action='store_true',
                        help='Skip training, only evaluate existing checkpoints')
+    parser.add_argument('--retrain_strategies', nargs='+', default=[],
+                       help='Strategies to force retraining even if checkpoint exists')
     parser.add_argument('--results_dir', default='significance_results_sleep',
                        help='Directory to save results')
     args = parser.parse_args()
     
-    # Create results directory
     os.makedirs(args.results_dir, exist_ok=True)
     
-    # Store all results
     all_results = {strategy: [] for strategy in args.strategies}
     
-    # Run experiments
     total_experiments = len(args.strategies) * args.seeds
     completed = 0
     
@@ -189,17 +178,21 @@ def main():
             save_dir = f"checkpoints/significance_sleep/{strategy}_seed{seed}"
             checkpoint = f"{save_dir}/best_model.pth"
             
-            # Train if needed
+            # Train if needed (MINIMAL CHANGE HERE)
             if not args.skip_training:
-                if os.path.exists(checkpoint):
+                should_retrain = strategy in args.retrain_strategies
+                
+                if os.path.exists(checkpoint) and not should_retrain:
                     print(f"⏭  Checkpoint exists, skipping training: {checkpoint}")
                 else:
+                    if should_retrain and os.path.exists(checkpoint):
+                        print(f"🔁 Retraining forced for {strategy}, overwriting checkpoint")
+                    
                     success = train_model(strategy, seed, save_dir, args.n_epochs)
                     if not success:
                         print(f"❌ Skipping evaluation due to training failure")
                         continue
             
-            # Evaluate
             if not os.path.exists(checkpoint):
                 print(f"❌ Checkpoint not found: {checkpoint}")
                 continue
@@ -213,30 +206,25 @@ def main():
             metrics['strategy'] = strategy
             all_results[strategy].append(metrics)
             
-            # Save intermediate results
             result_file = f"{args.results_dir}/results_{strategy}.json"
             with open(result_file, 'w') as f:
                 json.dump(all_results[strategy], f, indent=2)
             print(f"✓ Results saved: {result_file}")
     
-    # Statistical analysis
     print(f"\n\n{'='*80}")
     print("STATISTICAL ANALYSIS - SLEEP STAGE CLASSIFICATION")
     print(f"{'='*80}\n")
     
-    # Check if we have any results
     total_results = sum(len(results) for results in all_results.values())
     if total_results == 0:
         print("❌ No results collected! All experiments failed.")
         sys.exit(1)
     
-    # Summary
     print("Results collected:")
     for strategy, results in all_results.items():
         print(f"  {strategy}: {len(results)} / {args.seeds} seeds")
     print()
     
-    # Compare all pairs
     for i, strategy_a in enumerate(args.strategies):
         for strategy_b in args.strategies[i+1:]:
             if not all_results[strategy_a] or not all_results[strategy_b]:
@@ -276,7 +264,6 @@ def main():
                 else:
                     print()
     
-    # Save full results
     full_results_file = f"{args.results_dir}/full_results.json"
     with open(full_results_file, 'w') as f:
         json.dump(all_results, f, indent=2)
