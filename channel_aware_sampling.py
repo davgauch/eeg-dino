@@ -19,13 +19,15 @@ BAND_RANGES = {
     'alpha': (8, 13),
     'beta':  (13, 30),
     'gamma': (30, 50),
+    'low_freq': (1, 25),    # Lower half of physiological range
+    'high_freq': (26, 50),  # Upper half of physiological range
 }
 
 ALL_BANDS = list(BAND_RANGES.keys())
 
 
 def parse_mask_strategy(strategy: str):
-    """Parse mask strategy: 'alpha', 'alpha+beta', 'all', 'random', 'none', 'spatiotemporal'."""
+    """Parse mask strategy."""
     if strategy in ('none', 'random', 'spatiotemporal'):
         return strategy
     bands = [b.strip() for b in strategy.split('+')]
@@ -34,9 +36,8 @@ def parse_mask_strategy(strategy: str):
     for b in bands:
         if b not in BAND_RANGES:
             raise ValueError(
-                f"Unknown band '{b}'. Choose from {ALL_BANDS} "
-                f"or combine with '+' (e.g. 'alpha+beta'), or use "
-                f"'random'/'none'/'spatiotemporal'/'all'.")
+                f"Unknown band '{b}'. Choose from {list(BAND_RANGES.keys())} "
+                f"or use 'random'/'none'/'spatiotemporal'.")
     return bands
 
 
