@@ -19,7 +19,7 @@ CONFIG = dict(
     n_channels=2, sampling_rate=200, epoch_duration=30,
     embed_dim=64, n_layers=2, n_heads=4, mlp_dim=128,
     out_dim=4096, head_hidden_dim=256, head_bottleneck_dim=64,
-    n_local_views=4, n_masked_views=1, batch_size=64,
+    n_local_views=8, n_masked_views=2, batch_size=64,
     learning_rate=1.25e-4, warmup_epochs=10,
     weight_decay_start=0.04, weight_decay_end=0.40,
     momentum_start=0.996, momentum_end=1.0,
@@ -448,6 +448,7 @@ def main():
     if args.batch_size:  cfg['batch_size'] = args.batch_size
     if args.lr:          cfg['learning_rate'] = args.lr
     if args.mask_strategy: cfg['mask_strategy'] = args.mask_strategy
+    if cfg['mask_strategy'] == 'none': cfg['n_masked_views'] = 0 # override to ensure no masked views if strategy is 'none'
 
     print(f"\n{'='*60}")
     print(f"EEG-DINO | {args.dataset} | preset: {args.preset} | seed: {args.seed}")
