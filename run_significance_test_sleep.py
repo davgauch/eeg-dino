@@ -61,7 +61,8 @@ def evaluate_model(checkpoint, strategy, seed):
         '--preset', 'tiny',
         '--n_classes', '5',
         '--probe_epochs', '50',
-        '--probe_lr', '1e-3'
+        '--probe_lr', '1e-3',
+        '--seed', str(seed)
     ]
     
     print(f"\n{'='*60}")

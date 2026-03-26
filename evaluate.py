@@ -5,6 +5,7 @@ Usage:
 """
 
 import argparse, torch, numpy as np
+import random
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from sklearn.metrics import accuracy_score, f1_score, cohen_kappa_score
@@ -135,10 +136,17 @@ def main():
     p.add_argument('--probe_epochs', type=int, default=50)
     p.add_argument('--probe_lr', type=float, default=1e-3)
     p.add_argument('--preset', default='tiny', choices=list(PRESETS.keys()))
+    p.add_argument('--seed', type=int, default=42)
     args = p.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     cfg = PRESETS[args.preset]
+
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if device == 'cuda':
+        torch.cuda.manual_seed_all(args.seed)
 
     backbone = FrozenBackbone(
         cfg['n_channels'], cfg['sampling_rate'],
