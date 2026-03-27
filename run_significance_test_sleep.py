@@ -176,7 +176,7 @@ def main():
             print(f"# Experiment {completed}/{total_experiments}: {strategy} | Seed {seed}")
             print(f"{'#'*80}")
             
-            save_dir = f"checkpoints/significance_sleep/{strategy}_seed{seed}"
+            save_dir = f"checkpoints/significance_sleep_model2/{strategy}_seed{seed}"
             checkpoint = f"{save_dir}/best_model.pth"
             
             # Train if needed (MINIMAL CHANGE HERE)
