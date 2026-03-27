@@ -19,7 +19,7 @@ CONFIG = dict(
     n_channels=2, sampling_rate=200, epoch_duration=30,
     embed_dim=64, n_layers=2, n_heads=4, mlp_dim=128,
     out_dim=4096, head_hidden_dim=256, head_bottleneck_dim=64,
-    n_local_views=8, n_masked_views=2, batch_size=64,
+    n_local_views=4, n_masked_views=1, batch_size=64,
     learning_rate=1.25e-4, warmup_epochs=10,
     weight_decay_start=0.04, weight_decay_end=0.40,
     momentum_start=0.996, momentum_end=1.0,
@@ -299,6 +299,8 @@ class EEGDINOTrainer:
         tot, sig_t, pat_t = 0., 0., 0.
         diag = {'s_std': 0., 't_std': 0., 'c_norm': 0., 'grad_norm': 0.}
 
+        has_masked_views = (self.sampler.n_masked_views > 0)  # ← ADD THIS
+
         for x in loader:
             # 1.Update schedules
             self._update_schedules()
@@ -309,8 +311,12 @@ class EEGDINOTrainer:
 
             # 3. Compute losses
             l_sig, _ = self.signal_loss_fn(s_out, t_out, self.teacher.center)
-            l_pat = self.patch_loss_fn(s_pat, t_pat, self.teacher.patch_center)
-            loss = l_sig + l_pat
+            if has_masked_views:
+                l_pat = self.patch_loss_fn(s_pat, t_pat, self.teacher.patch_center)
+                loss = l_sig + l_pat
+            else:
+                l_pat = torch.tensor(0.0, device=self.device)
+                loss = l_sig
 
             # 4. Backward pass
             self.optimizer.zero_grad()
@@ -325,8 +331,10 @@ class EEGDINOTrainer:
             with torch.no_grad():
                 tg = torch.cat([t_out['global_0'], t_out['global_1']])
                 self.teacher.update_center(tg)
-                tp = torch.cat([t_pat['global_0'], t_pat['global_1']])
-                self.teacher.update_patch_center(tp)
+                
+                if has_masked_views:
+                    tp = torch.cat([t_pat['global_0'], t_pat['global_1']])
+                    self.teacher.update_patch_center(tp)
 
                 # 7. diagnostics
                 s_cat = torch.cat([v for v in s_out.values()])
@@ -349,12 +357,20 @@ class EEGDINOTrainer:
         self.student.eval()
         self.teacher.eval()
         tot, sig_t, pat_t = 0., 0., 0.
+        has_masked_views = (self.sampler.n_masked_views > 0)
 
         for x in loader:
             s_out, t_out, s_pat, t_pat = self._forward(x)
             l_sig, _ = self.signal_loss_fn(s_out, t_out, self.teacher.center)
-            l_pat = self.patch_loss_fn(s_pat, t_pat, self.teacher.patch_center)
-            tot += (l_sig + l_pat).item()
+
+            if has_masked_views:
+                l_pat = self.patch_loss_fn(s_pat, t_pat, self.teacher.patch_center)
+                total_loss = l_sig + l_pat
+            else:
+                l_pat = torch.tensor(0.0, device=self.device)
+                total_loss = l_sig 
+                      
+            tot += total_loss.item()
             sig_t += l_sig.item()
             pat_t += l_pat.item()
 
