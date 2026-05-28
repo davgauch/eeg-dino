@@ -1,16 +1,10 @@
-"""Channel-Aware Sampling — multi-scale view generation for DINO.
-
-Global views: ceil(70%) channels, 80% temporal window.
-Local views:  floor(30%) channels, 50% temporal window.
-Masked views: global crop + bandstop filter on a physiological band.
-
-Adaptive channel sampling:
-- Low-channel datasets (≤5): Enable channel subsampling for robustness
-- High-channel datasets (>5): Disable channel subsampling, preserve spatial info
-"""
+"""Channel-Aware Sampling — multi-scale view generation for DINO."""
 import math
 import torch
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 BAND_RANGES = {
@@ -18,9 +12,17 @@ BAND_RANGES = {
     'theta': (4, 8),
     'alpha': (8, 13),
     'beta':  (13, 30),
-    'gamma': (30, 50),
-    'low_freq': (1, 25),    # Lower half of physiological range
-    'high_freq': (26, 50),  # Upper half of physiological range
+    'beta_upper': (20, 30),
+
+    # Bandwidth grid search (starting at 4 Hz)
+    'theta_bw1': (4, 5),   # 1 Hz bandwidth
+    'theta_bw2': (4, 6),   
+    'theta_bw3': (4, 7), 
+    'theta_bw5': (4, 9),  
+    'theta_bw6': (4, 10), 
+    'theta_bw8': (4, 12),
+    'theta_bw10': (4, 14), 
+    'theta_bw12': (4, 16),
 }
 
 ALL_BANDS = list(BAND_RANGES.keys())
@@ -28,9 +30,9 @@ ALL_BANDS = list(BAND_RANGES.keys())
 
 def parse_mask_strategy(strategy: str):
     """Parse mask strategy."""
-    if strategy in ('none', 'random', 'spatiotemporal'):
+    if strategy in ('none', 'random', 'spatiotemporal'): # spatiotemporal is method used in original paper
         return strategy
-    bands = [b.strip() for b in strategy.split('+')]
+    bands = [b.strip() for b in strategy.split('+')] # you can specify multiple bands like "alpha+beta"
     if bands == ['all']:
         return ALL_BANDS
     for b in bands:
@@ -62,13 +64,13 @@ class ChannelAwareSampling:
             override_msg = "auto-detected"
         
         if self.use_channel_sampling:
-            print(f"[ChannelAwareSampling] Channel subsampling ENABLED "
-                  f"({override_msg}, n_channels={n_channels} ≤ 5)")
-            print(f"  → Global views: ~70% channels, Local views: ~30% channels")
+            logger.info("[ChannelAwareSampling] Channel subsampling ENABLED "
+                        f"({override_msg}, n_channels={n_channels} ≤ 5)")
+            logger.info("  → Global views: ~70% channels, Local views: ~30% channels")
         else:
-            print(f"[ChannelAwareSampling] Channel subsampling DISABLED "
-                  f"({override_msg}, n_channels={n_channels} > 5)")
-            print(f"  → All views use all {n_channels} channels (only temporal cropping)")
+            logger.info("[ChannelAwareSampling] Channel subsampling DISABLED "
+                        f"({override_msg}, n_channels={n_channels} > 5)")
+            logger.info(f"  → All views use all {n_channels} channels (only temporal cropping)")
 
     def _random_crop(self, x, ch_frac, time_frac, ceil_ch=False):
         B, C, T = x.shape

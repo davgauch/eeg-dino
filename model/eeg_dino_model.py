@@ -2,8 +2,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from tfe_module import TimeFrequencyEmbedding
-from dpe_module import DecoupledPositionalEmbedding
+
+from .dpe_module import DecoupledPositionalEmbedding
+from .tfe_module import TimeFrequencyEmbedding
 
 
 class DINOHead(nn.Module):

@@ -1,193 +1,21 @@
-"""EEG-DINO Pre-Training on Sleep-EDF and BCI-IV datasets."""
+"""EEG-DINO pre-training on Sleep-EDF and BCI-IV datasets."""
 
-import os, math, argparse, random
+import argparse
+import math
+import os
+import random
+
 import torch
 import numpy as np
-from tqdm import tqdm
-from torch.utils.data import Dataset, DataLoader
-import scipy.io
+from torch.utils.data import DataLoader
+import logging
+import sys
 
-from eeg_dino_model import StudentModel, TeacherModel
-from channel_aware_sampling import ChannelAwareSampling
-from losses import DINOLoss, PatchLoss
-
-SLEEP_EDF_PATH = '/net/inltitan2.epfl.ch/scratch2/tzhu/EEGPT/datasets/downstream/sleep_edf/'
-BCI_2A_PATH = '/net/inltitan2.epfl.ch/scratch2/tzhu/EEGPT/datasets/downstream/Raw_data/BCICIV_2a_gdf/'
-BCI_2B_PATH = '/net/inltitan2.epfl.ch/scratch2/tzhu/EEGPT/datasets/downstream/Raw_data/BCICIV_2b_gdf/'
-
-CONFIG = dict(
-    n_channels=2, sampling_rate=200, epoch_duration=30,
-    embed_dim=64, n_layers=2, n_heads=4, mlp_dim=128,
-    out_dim=4096, head_hidden_dim=256, head_bottleneck_dim=64,
-    n_local_views=8, n_masked_views=2, batch_size=64,
-    learning_rate=1e-4, warmup_epochs=10,
-    weight_decay_start=0.04, weight_decay_end=0.40,
-    momentum_start=0.996, momentum_end=1.0,
-    n_epochs=100, mask_strategy='alpha',
-)
-
-CONFIG_BCI_2A = dict(
-    n_channels=22, sampling_rate=250, epoch_duration=4,
-    embed_dim=128, n_layers=4, n_heads=8, mlp_dim=512,
-    out_dim=4096, head_hidden_dim=256, head_bottleneck_dim=64,
-    n_local_views=4, n_masked_views=1, batch_size=32,
-    learning_rate=1.25e-4, warmup_epochs=10,
-    weight_decay_start=0.04, weight_decay_end=0.40,
-    momentum_start=0.996, momentum_end=1.0,
-    n_epochs=100, mask_strategy='alpha',
-)
-
-CONFIG_BCI_2B = dict(
-    n_channels=3, sampling_rate=250, epoch_duration=6,
-    embed_dim=64, n_layers=2, n_heads=4, mlp_dim=128,
-    out_dim=4096, head_hidden_dim=256, head_bottleneck_dim=64,
-    n_local_views=4, n_masked_views=1, batch_size=64,
-    learning_rate=1.25e-4, warmup_epochs=10,
-    weight_decay_start=0.04, weight_decay_end=0.40,
-    momentum_start=0.996, momentum_end=1.0,
-    n_epochs=100, mask_strategy='spatiotemporal',
-)
-
-PRESETS = {'tiny': CONFIG, 'bci_2a': CONFIG_BCI_2A, 'bci_2b': CONFIG_BCI_2B}
-
-
-class SleepEDFDataset(Dataset):
-
-    def __init__(self, root, fold='TrainFold', n_channels=2,
-                 sampling_rate=200):
-        from glob import glob
-        import torch.nn.functional as F
-
-        self.n_channels = n_channels
-        self.sampling_rate = sampling_rate
-        self.epoch_len = sampling_rate * 30
-
-        pt_files = sorted(glob(os.path.join(root, fold, '**/*.pt'), recursive=True))
-        print(f"[SleepEDF/{fold}] {len(pt_files)} files, loading...")
-
-        self.data, self.labels = [], []
-        for fp in tqdm(pt_files, desc=f"SleepEDF/{fold}"):
-            try:
-                label = int(os.path.basename(os.path.dirname(fp))) # label name 0-4 sleep stages
-                t = torch.load(fp, map_location='cpu', weights_only=True).float()
-
-                # Resample to target sampling rate (200*30=6000 samples)
-                t = F.interpolate(t.unsqueeze(0), size=self.epoch_len,
-                                  mode='linear', align_corners=False).squeeze(0)
-                
-                real = t[:min(t.shape[0], n_channels)]
-                t = (t - real.mean()) / (real.std() + 1e-8)
-
-                # Handle channel dimension: trim or pad to n_channels
-                if t.shape[0] >= n_channels:
-                    t = t[:n_channels]
-                else:
-                    pad = torch.zeros(n_channels - t.shape[0], t.shape[1])
-                    t = torch.cat([t, pad], dim=0)
-
-                self.data.append(t)
-                self.labels.append(label)
-            except Exception as e:
-                print(f"  Skip {fp}: {e}")
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        return self.data[idx], self.labels[idx]
-
-class BCITrialBasedDataset(Dataset):
-    """BCI dataset extracting only clean motor imagery periods using event markers."""
-
-    def __init__(self, gdf_paths, n_channels, sampling_rate, epoch_duration,
-                 mi_offset=2.0):
-        import mne
-        import scipy.io
-        mne.set_log_level('WARNING')
-        
-        self.n_channels = n_channels
-        self.sampling_rate = sampling_rate
-        self.epoch_duration = epoch_duration
-        self.samples_per_epoch = int(epoch_duration * sampling_rate)
-        self.trials = []
-        
-        for gdf_path in tqdm(gdf_paths, desc="Loading BCI trials"):
-            try:
-                mat_path = gdf_path.replace('.gdf', '.mat')
-                if not os.path.exists(mat_path):
-                    print(f"  Warning: No .mat file for {os.path.basename(gdf_path)}")
-                    continue
-                
-                raw = mne.io.read_raw_gdf(gdf_path, preload=True, verbose=False)
-                raw.pick_types(eeg=True, exclude=[]) # keep only EEG channels
-                
-                if len(raw.ch_names) > n_channels:
-                    raw.pick(raw.ch_names[:n_channels])
-                if raw.info['sfreq'] != sampling_rate:
-                    raw.resample(sampling_rate)
-                
-                signal = raw.get_data()
-                
-                mat = scipy.io.loadmat(mat_path)
-                labels = mat['classlabel'].flatten().astype(int) - 1
-                
-                # Get event code for trial start (768)
-                events, event_id = mne.events_from_annotations(raw, verbose=False)
-                onset_code = event_id.get('768')
-                if onset_code is None:
-                    print(f"  Warning: Event 768 not found in {os.path.basename(gdf_path)}")
-                    print(f"    Available events: {event_id}")
-                    continue
-                
-                trial_starts = [ev[0] for ev in events if ev[2] == onset_code]
-                
-                if len(trial_starts) != len(labels):
-                    print(f"  Warning: Trial count mismatch in {os.path.basename(gdf_path)}")
-                    print(f"    Events: {len(trial_starts)}, Labels: {len(labels)}")
-                
-                mi_start_offset = int(mi_offset * sampling_rate) # 2.0s * 250Hz = 500 samples after trial start
-                for trial_start in trial_starts:
-                    mi_start = trial_start + mi_start_offset
-                    mi_end = mi_start + self.samples_per_epoch
-                    
-                    if mi_end <= signal.shape[1] and mi_start >= 0:
-                        trial_data = signal[:, mi_start:mi_end]
-                        if not np.isnan(trial_data).any():
-                            # channel-wise normalization
-                            trial_data = (trial_data - trial_data.mean(axis=1, keepdims=True)) / (trial_data.std(axis=1, keepdims=True) + 1e-8)
-                            self.trials.append(torch.from_numpy(trial_data).float())
-                            
-            except Exception as e:
-                import traceback
-                print(f"  Error loading {os.path.basename(gdf_path)}: {e}")
-                traceback.print_exc()
-                continue
-        
-        print(f"  → {len(self.trials)} clean MI trials ({n_channels} ch, {epoch_duration}s)")
-
-    def __len__(self):
-        return len(self.trials)
-
-    def __getitem__(self, idx):
-        trial = self.trials[idx]
-        n_ch = trial.shape[0]
-        if n_ch == self.n_channels:
-            return trial
-        if n_ch > self.n_channels:
-            return trial[:self.n_channels]
-        pad = torch.zeros(self.n_channels - n_ch, trial.shape[1])
-        return torch.cat([trial, pad], dim=0)
-    
-
-class UnlabeledWrapper(Dataset):
-    """Wraps a dataset to return only the signal (ignoring labels) for self-supervised training."""
-    def __init__(self, ds):
-        self.ds = ds
-    def __len__(self):
-        return len(self.ds)
-    def __getitem__(self, idx):
-        x = self.ds[idx]
-        return x[0] if isinstance(x, (list, tuple)) else x
+from model.eeg_dino_model import StudentModel, TeacherModel
+from model.channel_aware_sampling import ChannelAwareSampling
+from model.losses import DINOLoss, PatchLoss
+from configs import PRESETS
+from datasets import BCITrialBasedDataset, SleepEDFDataset, UnlabeledWrapper, get_dataset_root
 
 
 def cosine_schedule(base, final, total, step):
@@ -236,14 +64,14 @@ class EEGDINOTrainer:
             self.student.parameters(), lr=learning_rate,
             weight_decay=weight_decay_start)
 
-        print(f"Mask strategy: '{mask_strategy}'")
+        logging.getLogger(__name__).info(f"Mask strategy: '{mask_strategy}'")
 
         self.total_steps = None
         self.step = 0
         self.momentum = momentum_start
 
         n_p = sum(p.numel() for p in self.student.parameters())
-        print(f"Model: {n_p/1e6:.2f}M params | device: {self.device}")
+        logging.getLogger(__name__).info(f"Model: {n_p/1e6:.2f}M params | device: {self.device}")
 
     @staticmethod
     def _expand_ci(ci, B):
@@ -393,8 +221,9 @@ class EEGDINOTrainer:
         self.total_steps = len(train_loader) * self.n_epochs
         self.step = 0
 
-        print(f"Epochs: {self.n_epochs} | Steps/epoch: {len(train_loader)} | "
-              f"Total: {self.total_steps} | LR: {self.base_lr} | BS: {self.batch_size}\n")
+        logging.getLogger(__name__).info(
+            f"Epochs: {self.n_epochs} | Steps/epoch: {len(train_loader)} | "
+            f"Total: {self.total_steps} | LR: {self.base_lr} | BS: {self.batch_size}\n")
 
         collapse_threshold = math.log(self.signal_loss_fn.out_dim)
         best = float('inf')
@@ -407,21 +236,26 @@ class EEGDINOTrainer:
             wd = self.optimizer.param_groups[0]['weight_decay']
             t_temp = self.signal_loss_fn.teacher_temp
 
-            print(f"Ep {epoch:3d} | loss:{tr['loss']:.4f} sig:{tr['signal']:.4f} pat:{tr['patch']:.4f}"
-                  f" | lr:{lr:.2e} wd:{wd:.3f} mom:{self.momentum:.5f} t_temp:{t_temp:.4f}")
-            print(f"        | s_std:{d['s_std']:.6f} t_std:{d['t_std']:.6f}"
-                  f" c_norm:{d['c_norm']:.4f} grad:{d['grad_norm']:.4f}")
+            logging.getLogger(__name__).info(
+                f"Ep {epoch:3d} | loss:{tr['loss']:.4f} sig:{tr['signal']:.4f} pat:{tr['patch']:.4f}"
+                f" | lr:{lr:.2e} wd:{wd:.3f} mom:{self.momentum:.5f} t_temp:{t_temp:.4f}")
+            logging.getLogger(__name__).info(
+                f"        | s_std:{d['s_std']:.6f} t_std:{d['t_std']:.6f}"
+                f" c_norm:{d['c_norm']:.4f} grad:{d['grad_norm']:.4f}")
             
             # check for collapse (signal loss close to log(out_dim) and very low student std)
             if tr['signal'] > 0.95 * collapse_threshold:
-                print(f"  ⚠ COLLAPSE WARNING: sig_loss={tr['signal']:.4f} ~ {collapse_threshold:.2f}")
+                logging.getLogger(__name__).warning(
+                    f"⚠ COLLAPSE WARNING: sig_loss={tr['signal']:.4f} ~ {collapse_threshold:.2f}")
             if d['s_std'] < 1e-4:
-                print(f"  ⚠ STUDENT OUTPUTS COLLAPSED: std={d['s_std']:.8f}")
+                logging.getLogger(__name__).warning(
+                    f"⚠ STUDENT OUTPUTS COLLAPSED: std={d['s_std']:.8f}")
 
             monitor = tr['loss']
             if val_loader:
                 va = self._val_epoch(val_loader)
-                print(f"   Val  | loss:{va['loss']:.4f} sig:{va['signal']:.4f} pat:{va['patch']:.4f}")
+                logging.getLogger(__name__).info(
+                    f"   Val  | loss:{va['loss']:.4f} sig:{va['signal']:.4f} pat:{va['patch']:.4f}")
                 monitor = va['loss']
 
             # save best 
@@ -429,13 +263,13 @@ class EEGDINOTrainer:
                 best = monitor
                 torch.save(self._checkpoint(epoch, tr),
                            os.path.join(save_dir, 'best_model.pth'))
-                print(f"  ✓ Best ({best:.4f})")
+                logging.getLogger(__name__).info(f"✓ Best ({best:.4f})")
 
             if epoch % 10 == 0:
                 torch.save(self._checkpoint(epoch, tr),
                            os.path.join(save_dir, f'ckpt_ep{epoch}.pth'))
 
-        print(f"\nDone! Best loss: {best:.4f} → {save_dir}/")
+        logging.getLogger(__name__).info(f"\nDone! Best loss: {best:.4f} → {save_dir}/")
 
 
 def main():
@@ -458,6 +292,12 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
+    # configure logging for CLI runs
+    logging.basicConfig(level=logging.INFO,
+                        stream=sys.stdout,
+                        format='[%(asctime)s] %(levelname)s:%(name)s: %(message)s',
+                        datefmt='%Y-%m-%d %H:%M:%S')
+
     # Load preset config and override with command-line args
     cfg = {**PRESETS[args.preset], 'device': 'cuda' if torch.cuda.is_available() else 'cpu'}
     if args.n_epochs:    cfg['n_epochs'] = args.n_epochs
@@ -465,6 +305,11 @@ def main():
     if args.lr:          cfg['learning_rate'] = args.lr
     if args.mask_strategy: cfg['mask_strategy'] = args.mask_strategy
     if cfg['mask_strategy'] == 'none': cfg['n_masked_views'] = 0 # override to ensure no masked views if strategy is 'none'
+
+    run_leaf = f"{cfg['mask_strategy']}_seed{args.seed}"
+    save_dir = args.save_dir
+    if os.path.basename(os.path.normpath(save_dir)) != run_leaf:
+        save_dir = os.path.join(save_dir, run_leaf)
 
     print(f"\n{'='*60}")
     print(f"EEG-DINO | {args.dataset} | preset: {args.preset} | seed: {args.seed}")
@@ -474,24 +319,27 @@ def main():
     epoch_dur = cfg.get('epoch_duration', 30)
 
     if args.dataset == 'sleep_edf':
+        sleep_root = get_dataset_root('sleep_edf')
         tr_ds = UnlabeledWrapper(SleepEDFDataset(
-            SLEEP_EDF_PATH, 'TrainFold', nc, sr))
+            sleep_root, 'TrainFold', nc, sr))
         va_ds = UnlabeledWrapper(SleepEDFDataset(
-            SLEEP_EDF_PATH, 'ValidFold', nc, sr))
+            sleep_root, 'ValidFold', nc, sr))
     
     elif args.dataset == 'bci_2a':
         from glob import glob
-        gdf_paths = sorted(glob(os.path.join(BCI_2A_PATH, '*T.gdf')))
+        bci_2a_root = get_dataset_root('bci_2a')
+        gdf_paths = sorted(glob(os.path.join(bci_2a_root, '*T.gdf')))
         tr_ds = BCITrialBasedDataset(gdf_paths, nc, sr, epoch_dur, mi_offset=2.0)
         va_ds = None
     
     elif args.dataset == 'bci_2b':
         from glob import glob
+        bci_2b_root = get_dataset_root('bci_2b')
         sessions = ['01T', '02T', '03T']
         gdf_paths = []
         for i in range(1, 10):
             for s in sessions:
-                path = os.path.join(BCI_2B_PATH, f'B{i:02d}{s}.gdf')
+                path = os.path.join(bci_2b_root, f'B{i:02d}{s}.gdf')
                 if os.path.exists(path):
                     gdf_paths.append(path)
         tr_ds = BCITrialBasedDataset(gdf_paths, nc, sr, epoch_dur, mi_offset=3.0)
@@ -510,7 +358,7 @@ def main():
 
     trainer_cfg = {k: v for k, v in cfg.items() if k != 'epoch_duration'}
     trainer = EEGDINOTrainer(**trainer_cfg)
-    trainer.train(tr_loader, va_loader, save_dir=args.save_dir)
+    trainer.train(tr_loader, va_loader, save_dir=save_dir)
 
 
 if __name__ == '__main__':

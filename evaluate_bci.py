@@ -16,11 +16,14 @@ import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import accuracy_score, f1_score, cohen_kappa_score
 from tqdm import tqdm
+import sys
 
-from eeg_dino_model import EEGTransformer
-from tfe_module import TimeFrequencyEmbedding
-from dpe_module import DecoupledPositionalEmbedding
-from train import PRESETS, BCI_2A_PATH, BCI_2B_PATH
+from model.eeg_dino_model import EEGTransformer
+from model.tfe_module import TimeFrequencyEmbedding
+from model.dpe_module import DecoupledPositionalEmbedding
+from configs import PRESETS
+from datasets import get_dataset_root
+import logging
 
 
 class FrozenBackbone(nn.Module):
@@ -52,13 +55,6 @@ class FrozenBackbone(nn.Module):
 
 
 def get_mi_offset(bci_type, trial_duration):
-    """Extract the official motor imagery period.
-    
-    BCI-IV 2a: MI period is [2.0s, 6.0s] from event 768 (4 seconds)
-    BCI-IV 2b: MI period is [3.0s, 7.0s] from event 768 (4 seconds)
-    
-    Always start at cue onset to match training.
-    """
     if bci_type == '2a':
         return 2.0  # Always start at cue onset
     else:  # 2b
@@ -250,17 +246,19 @@ def eval_within_subject(backbone, bci, cfg, args, mi_off):
 
     results = []
     for sid in subjects:
-        print(f"\n--- Within-subject: {sid} ---")
+        logging.getLogger(__name__).info(f"--- Within-subject: {sid} ---")
         if bci == '2a':
-            train_ds, test_ds = load_subject_2a(BCI_2A_PATH, sid, nc, sr, td, mi_off)
+            train_ds, test_ds = load_subject_2a(get_dataset_root('bci_2a'), sid, nc, sr, td, mi_off)
         else:
-            train_ds, test_ds = load_subject_2b(BCI_2B_PATH, sid, nc, sr, td, mi_off)
+            train_ds, test_ds = load_subject_2b(get_dataset_root('bci_2b'), sid, nc, sr, td, mi_off)
 
-        print(f"  Train: {len(train_ds)} trials (T) | Test: {len(test_ds)} trials (E)")
+        logging.getLogger(__name__).info(
+            f"  Train: {len(train_ds)} trials (T) | Test: {len(test_ds)} trials (E)")
         acc, f1, kappa = train_and_eval(
             backbone, train_ds, test_ds, cfg['embed_dim'], device,
             args.probe_epochs, args.probe_lr)
-        print(f"  Acc: {acc:.4f} | F1: {f1:.4f} | Kappa: {kappa:.4f}")
+        logging.getLogger(__name__).info(
+            f"  Acc: {acc:.4f} | F1: {f1:.4f} | Kappa: {kappa:.4f}")
         results.append({'subject': sid, 'acc': acc, 'f1': f1, 'kappa': kappa})
 
     return results
@@ -271,20 +269,21 @@ def eval_loso(backbone, bci, cfg, args, mi_off):
     device = next(backbone.parameters()).device
     subjects = [f'A{s:02d}' for s in range(1, 10)] if bci == '2a' else [f'B{s:02d}' for s in range(1, 10)]
 
-    print(f"Loading {len(subjects)} subjects (T=probe train, E=probe test)...")
+    logging.getLogger(__name__).info(
+        f"Loading {len(subjects)} subjects (T=probe train, E=probe test)...")
     all_train, all_test = {}, {}
     for sid in tqdm(subjects, desc="Subjects"):
         if bci == '2a':
-            tr, te = load_subject_2a(BCI_2A_PATH, sid, nc, sr, td, mi_off)
+            tr, te = load_subject_2a(get_dataset_root('bci_2a'), sid, nc, sr, td, mi_off)
         else:
-            tr, te = load_subject_2b(BCI_2B_PATH, sid, nc, sr, td, mi_off)
+            tr, te = load_subject_2b(get_dataset_root('bci_2b'), sid, nc, sr, td, mi_off)
         all_train[sid] = tr
         all_test[sid] = te
-        print(f"  {sid}: T={len(tr)} trials, E={len(te)} trials")
+        logging.getLogger(__name__).info(f"  {sid}: T={len(tr)} trials, E={len(te)} trials")
 
     results = []
     for test_sid in subjects:
-        print(f"\n--- LOSO: held-out {test_sid} ---")
+        logging.getLogger(__name__).info(f"--- LOSO: held-out {test_sid} ---")
         train_data, train_labels = [], []
         for sid in subjects:
             if sid == test_sid:
@@ -301,13 +300,15 @@ def eval_loso(backbone, bci, cfg, args, mi_off):
         te = all_test[test_sid]
         test_ds = te if isinstance(te, _ListDataset) else _ListDataset(te.data, te.labels)
 
-        print(f"  Train: {len(train_ds)} trials ({len(subjects)-1} subj T) | "
-              f"Test: {len(test_ds)} trials ({test_sid} E)")
+        logging.getLogger(__name__).info(
+            f"  Train: {len(train_ds)} trials ({len(subjects)-1} subj T) | "
+            f"Test: {len(test_ds)} trials ({test_sid} E)")
 
         acc, f1, kappa = train_and_eval(
             backbone, train_ds, test_ds, cfg['embed_dim'], device,
             args.probe_epochs, args.probe_lr)
-        print(f"  Acc: {acc:.4f} | F1: {f1:.4f} | Kappa: {kappa:.4f}")
+        logging.getLogger(__name__).info(
+            f"  Acc: {acc:.4f} | F1: {f1:.4f} | Kappa: {kappa:.4f}")
         results.append({'subject': test_sid, 'acc': acc, 'f1': f1, 'kappa': kappa})
 
     return results
@@ -328,13 +329,20 @@ def main():
                    help='Trial duration in seconds (default: auto-detect from preset)')
     args = p.parse_args()
 
+    # configure logging for CLI
+    logging.basicConfig(level=logging.INFO,
+                        stream=sys.stdout,
+                        format='[%(asctime)s] %(levelname)s:%(name)s: %(message)s',
+                        datefmt='%Y-%m-%d %H:%M:%S')
+
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     cfg = PRESETS[args.preset]
 
     if args.trial_duration is None:
         args.trial_duration = cfg.get('epoch_duration', 4.0)
-        print(f"Auto-detected trial_duration={args.trial_duration}s from preset "
-              f"(matches pretraining epoch_duration)")
+        logging.getLogger(__name__).info(
+            f"Auto-detected trial_duration={args.trial_duration}s from preset "
+            f"(matches pretraining epoch_duration)")
 
     mi_offset = get_mi_offset(args.bci, args.trial_duration)
 
@@ -344,9 +352,9 @@ def main():
     ).to(device)
 
     if args.checkpoint == 'random':
-        print("Using RANDOM (untrained) backbone as baseline")
+        logging.getLogger(__name__).info("Using RANDOM (untrained) backbone as baseline")
     else:
-        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=True)
+        ckpt = torch.load(args.checkpoint, map_location=device)
         bb_sd = {}
         for k, v in ckpt['student'].items():
             for prefix in ('tfe.', 'dpe.', 'transformer.'):
@@ -354,13 +362,18 @@ def main():
                     bb_sd[k] = v
                     break
         backbone.load_state_dict(bb_sd, strict=True)
-        print(f"Loaded backbone from {args.checkpoint} (epoch {ckpt.get('epoch', '?')})")
+        logging.getLogger(__name__).info(
+            f"Loaded backbone from {args.checkpoint} (epoch {ckpt.get('epoch', '?')})")
 
     mode_label = 'WITHIN-SUBJECT' if args.mode == 'within' else 'LOSO'
-    print(f"\n{mode_label} | BCI-IV {args.bci} | preset: {args.preset}")
-    print(f"  n_channels={cfg['n_channels']}, sampling_rate={cfg['sampling_rate']}Hz")
-    print(f"  trial_duration={args.trial_duration}s, mi_offset={mi_offset}s")
-    print(f"  → Extracting [{mi_offset}, {mi_offset + args.trial_duration}]s from event 768\n")
+    logging.getLogger(__name__).info(
+        f"{mode_label} | BCI-IV {args.bci} | preset: {args.preset}")
+    logging.getLogger(__name__).info(
+        f"  n_channels={cfg['n_channels']}, sampling_rate={cfg['sampling_rate']}Hz")
+    logging.getLogger(__name__).info(
+        f"  trial_duration={args.trial_duration}s, mi_offset={mi_offset}s")
+    logging.getLogger(__name__).info(
+        f"  → Extracting [{mi_offset}, {mi_offset + args.trial_duration}]s from event 768\n")
 
     if args.mode == 'within':
         results = eval_within_subject(backbone, args.bci, cfg, args, mi_offset)
@@ -370,15 +383,15 @@ def main():
     accs = [r['acc'] for r in results]
     f1s = [r['f1'] for r in results]
     kappas = [r['kappa'] for r in results]
-    print(f"\n{'='*50}")
-    print(f"BCI-IV {args.bci} -- {mode_label} -- {len(results)} subjects")
-    print(f"  Accuracy : {np.mean(accs):.4f} +/- {np.std(accs):.4f}")
-    print(f"  F1 Macro : {np.mean(f1s):.4f} +/- {np.std(f1s):.4f}")
-    print(f"  Kappa    : {np.mean(kappas):.4f} +/- {np.std(kappas):.4f}")
-    print(f"{'='*50}")
+    logging.getLogger(__name__).info(f"\n{'='*50}")
+    logging.getLogger(__name__).info(f"BCI-IV {args.bci} -- {mode_label} -- {len(results)} subjects")
+    logging.getLogger(__name__).info(f"  Accuracy : {np.mean(accs):.4f} +/- {np.std(accs):.4f}")
+    logging.getLogger(__name__).info(f"  F1 Macro : {np.mean(f1s):.4f} +/- {np.std(f1s):.4f}")
+    logging.getLogger(__name__).info(f"  Kappa    : {np.mean(kappas):.4f} +/- {np.std(kappas):.4f}")
+    logging.getLogger(__name__).info(f"{'='*50}")
     for r in results:
-        print(f"  {r['subject']}: acc={r['acc']:.4f} f1={r['f1']:.4f} kappa={r['kappa']:.4f}")
-
+        logging.getLogger(__name__).info(
+            f"  {r['subject']}: acc={r['acc']:.4f} f1={r['f1']:.4f} kappa={r['kappa']:.4f}")
 
 if __name__ == '__main__':
     main()

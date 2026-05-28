@@ -207,3 +207,6 @@ marimo/_lsp/
 __marimo__/
 
 test_checkpoints/
+checkpoints/
+splits.json
+significance_results_sleep/

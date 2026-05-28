@@ -7,14 +7,17 @@ Usage:
 import argparse, torch, numpy as np
 import random
 import torch.nn as nn
+import logging
+import sys
 from torch.utils.data import DataLoader
 from sklearn.metrics import accuracy_score, f1_score, cohen_kappa_score
 from tqdm import tqdm
 
-from eeg_dino_model import EEGTransformer
-from tfe_module import TimeFrequencyEmbedding
-from dpe_module import DecoupledPositionalEmbedding
-from train import SleepEDFDataset, SLEEP_EDF_PATH, PRESETS
+from model.eeg_dino_model import EEGTransformer
+from model.tfe_module import TimeFrequencyEmbedding
+from model.dpe_module import DecoupledPositionalEmbedding
+from configs import PRESETS
+from datasets import SleepEDFDataset, get_dataset_root
 
 
 class FrozenBackbone(nn.Module):
@@ -59,7 +62,7 @@ def extract_features(backbone, loader, device):
 
 def train_linear_probe(backbone, train_loader, val_loader, n_classes, embed_dim,
                         device, epochs=50, lr=1e-3):
-    print("Extracting features...")
+    logging.getLogger(__name__).info("Extracting features...")
     tr_f, tr_y = extract_features(backbone, train_loader, device)
     va_f, va_y = extract_features(backbone, val_loader, device)
 
@@ -96,8 +99,9 @@ def train_linear_probe(backbone, train_loader, val_loader, n_classes, embed_dim,
 
         if ep % 10 == 0 or ep == 1:
             n_batches = max(1, len(tr_f) // 256)
-            print(f"  Probe ep{ep:3d} — loss:{total_loss/n_batches:.4f} "
-                  f"acc:{acc:.4f} f1:{f1:.4f}")
+            logging.getLogger(__name__).info(
+                f"Probe ep{ep:3d} — loss:{total_loss/n_batches:.4f} "
+                f"acc:{acc:.4f} f1:{f1:.4f}")
 
     probe.load_state_dict(best_state)
     return probe, best_acc
@@ -115,15 +119,16 @@ def evaluate_probe(probe, backbone, loader, device, class_names=None):
     f1 = f1_score(gt, preds, average='macro')
     kappa = cohen_kappa_score(gt, preds)
 
-    print(f"\n{'='*40}")
-    print(f"  Accuracy : {acc:.4f}")
-    print(f"  F1 Macro : {f1:.4f}")
-    print(f"  Kappa    : {kappa:.4f}")
-    print(f"{'='*40}")
+    logging.getLogger(__name__).info(f"\n{'='*40}")
+    logging.getLogger(__name__).info(f"  Accuracy : {acc:.4f}")
+    logging.getLogger(__name__).info(f"  F1 Macro : {f1:.4f}")
+    logging.getLogger(__name__).info(f"  Kappa    : {kappa:.4f}")
+    logging.getLogger(__name__).info(f"{'='*40}")
 
     if class_names:
         from sklearn.metrics import classification_report
-        print(classification_report(gt, preds, target_names=class_names, digits=4))
+        logging.getLogger(__name__).info(
+            classification_report(gt, preds, target_names=class_names, digits=4))
 
     return {'accuracy': acc, 'f1_macro': f1, 'kappa': kappa}
 
@@ -148,12 +153,18 @@ def main():
     if device == 'cuda':
         torch.cuda.manual_seed_all(args.seed)
 
+    # configure logging
+    logging.basicConfig(level=logging.INFO,
+                        stream=sys.stdout,
+                        format='[%(asctime)s] %(levelname)s:%(name)s: %(message)s',
+                        datefmt='%Y-%m-%d %H:%M:%S')
+
     backbone = FrozenBackbone(
         cfg['n_channels'], cfg['sampling_rate'],
         cfg['embed_dim'], cfg['n_layers'], cfg['n_heads'], cfg['mlp_dim']
     ).to(device)
 
-    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=True)
+    ckpt = torch.load(args.checkpoint, map_location=device)
     bb_sd = {}
     for k, v in ckpt['student'].items():
         for prefix in ('tfe.', 'dpe.', 'transformer.'):
@@ -161,13 +172,15 @@ def main():
                 bb_sd[k] = v
                 break
     backbone.load_state_dict(bb_sd, strict=True)
-    print(f"Loaded backbone from {args.checkpoint} (epoch {ckpt.get('epoch', '?')})")
+    logging.getLogger(__name__).info(
+        f"Loaded backbone from {args.checkpoint} (epoch {ckpt.get('epoch', '?')})")
 
     # Load Sleep-EDF splits
     n_ch, sr = cfg['n_channels'], cfg['sampling_rate']
-    train_ds = SleepEDFDataset(SLEEP_EDF_PATH, 'TrainFold', n_ch, sr)
-    val_ds   = SleepEDFDataset(SLEEP_EDF_PATH, 'ValidFold', n_ch, sr)
-    test_ds  = SleepEDFDataset(SLEEP_EDF_PATH, 'TestFold',  n_ch, sr)
+    sleep_root = get_dataset_root('sleep_edf')
+    train_ds = SleepEDFDataset(sleep_root, 'TrainFold', n_ch, sr)
+    val_ds = SleepEDFDataset(sleep_root, 'ValidFold', n_ch, sr)
+    test_ds = SleepEDFDataset(sleep_root, 'TestFold', n_ch, sr)
 
     train_loader = DataLoader(train_ds, 256, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_ds, 256, num_workers=4)

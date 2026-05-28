@@ -1,21 +1,14 @@
-"""Time-Frequency Embedding (TFE) — per-Hz PSD tokenizer.
-
-Input:  [B, C, T]
-Output: tokens       [B, n_tokens, embed_dim]
-        raw_features [B, n_tokens, C × 50]  (log-PSD at 1..50 Hz)
-"""
+"""Time-Frequency Embedding (TFE) — per-Hz PSD tokenizer."""
 import torch
 import torch.nn as nn
+from .channel_aware_sampling import BAND_RANGES as CHANNEL_BAND_RANGES
 
 
 class TimeFrequencyEmbedding(nn.Module):
 
     FREQ_MIN = 1
     FREQ_MAX = 50
-    BAND_RANGES = {
-        'delta': (1, 4), 'theta': (4, 8), 'alpha': (8, 13),
-        'beta': (13, 30), 'gamma': (30, 50),
-    }
+    BAND_RANGES = CHANNEL_BAND_RANGES
 
     def __init__(self, n_channels=2, sampling_rate=200, embed_dim=64):
         super().__init__()
@@ -29,7 +22,7 @@ class TimeFrequencyEmbedding(nn.Module):
         select[self.FREQ_MIN : self.FREQ_MAX + 1] = True # keep bins corresponding to 1..50 Hz
         self.register_buffer('_bin_select', select)
 
-        self.projection = nn.Linear(n_channels * self.n_freq_bins, embed_dim) # from frequency domain features to token embeddings
+        self.projection = nn.Linear(n_channels * self.n_freq_bins, embed_dim) #
 
     def extract_psd(self, segment):
         window = torch.hann_window(segment.shape[-1], device=segment.device) # apply Hann window to each 1-second segment
