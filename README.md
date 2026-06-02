@@ -6,7 +6,7 @@ Project layout
 
 - `train.py`, `evaluate.py`, `evaluate_bci.py`, and `run_significance_test_sleep.py` are the launch scripts.
 - `model/` contains the core implementation files: `channel_aware_sampling.py`, `dpe_module.py`, `eeg_dino_model.py`, `losses.py`, and `tfe_module.py`.
-- `experiments/` is reserved for future experiment scripts.
+- `experiments/` contains experimental analysis scripts
 - `configs.py`, `datasets.py`, `utils.py`, and `requirements.txt` stay at the root.
 - `checkpoints/` stores training outputs.
 - The raw dataset files stay on the server, as in the original setup.
@@ -32,6 +32,7 @@ eeg-dino/
     losses.py
     tfe_module.py
   experiments/
+    analyze_representation_quality.py
   checkpoints/
 ```
 
@@ -69,6 +70,17 @@ python run_significance_test_sleep.py --strategies spatiotemporal theta --seeds 
 
 You can point `--checkpoint_root` to a different directory if your saved runs live elsewhere.
 If the checkpoints already exist, add `--skip_training` to evaluate them directly without retraining.
+
+Analyze representation quality
+
+```bash
+python experiments/analyze_representation_quality.py \
+  --strategies none theta random \ 
+  --seeds 42 43 44 45 46 \
+  --checkpoint_dir checkpoints/significance_sleep_model \
+  --preset tiny
+```
+
 
 Notes
 

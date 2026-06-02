@@ -149,7 +149,6 @@ def run_paired_test(results_a, results_b, metric='accuracy'):
 def main():
     os.environ['MKL_THREADING_LAYER'] = 'GNU'
 
-    # configure logging before any log messages are emitted
     logging.basicConfig(level=logging.INFO,
                         stream=sys.stdout,
                         format='[%(asctime)s] %(levelname)s:%(name)s: %(message)s',
