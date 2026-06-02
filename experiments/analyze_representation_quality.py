@@ -14,6 +14,7 @@ import argparse
 import json
 import logging
 import sys
+import os
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -255,6 +256,11 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     cfg = PRESETS[args.preset]
 
+    checkpoint_dir = Path(args.checkpoint_dir)
+    if not checkpoint_dir.is_absolute():
+        checkpoint_dir = _REPO_ROOT / checkpoint_dir
+    checkpoint_dir = str(checkpoint_dir)
+
     logger = logging.getLogger(__name__)
     logger.info("="*80)
     logger.info("REPRESENTATION QUALITY ANALYSIS")
@@ -269,7 +275,7 @@ def main():
     results = {}
     for strategy in args.strategies:
         logger.info(f"\n[{strategy.upper()}]")
-        results[strategy] = analyze_strategy(strategy, args.seeds, args.checkpoint_dir, cfg, device)
+        results[strategy] = analyze_strategy(strategy, args.seeds, checkpoint_dir, cfg, device)
     
     # Print summary
     logger.info("\n" + "="*80)
@@ -306,12 +312,14 @@ def main():
     
     # Save results
     output = {'strategies': results}
-    
-    with open('representation_quality_analysis.json', 'w') as f:
+    results_dir = os.path.join(os.path.dirname(__file__), "results")
+    os.makedirs(results_dir, exist_ok=True)
+    output_path = os.path.join(results_dir, 'representation_quality_analysis.json')
+    with open(output_path, 'w') as f:
         json.dump(output, f, indent=2)
 
     logger.info("\n" + "="*80)
-    logger.info("✓ Saved: representation_quality_analysis.json")
+    logger.info(f"✓ Saved: {output_path}")
     logger.info("="*80)
 
 

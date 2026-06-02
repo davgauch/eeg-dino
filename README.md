@@ -7,9 +7,12 @@ Project layout
 - `train.py`, `evaluate.py`, `evaluate_bci.py`, and `run_significance_test_sleep.py` are the launch scripts.
 - `model/` contains the core implementation files: `channel_aware_sampling.py`, `dpe_module.py`, `eeg_dino_model.py`, `losses.py`, and `tfe_module.py`.
 - `experiments/` contains experimental analysis scripts
+  - `downstream_pairwise_accuracy.py`: computes pairwise downstream classification accuracy 
+  - `analyze_representation_quality.py`: extracts embeddings from frozen SSL models and reports clustering / kNN metrics 
+  - `compute_pairwise_AUC.py`: computes pairwise AUC per frequency band using log band power.
 - `configs.py`, `datasets.py`, `utils.py`, and `requirements.txt` stay at the root.
 - `checkpoints/` stores training outputs.
-- The raw dataset files stay on the server, as in the original setup.
+- The raw dataset files stay on the server.
 
 Project tree
 
@@ -33,6 +36,8 @@ eeg-dino/
     tfe_module.py
   experiments/
     analyze_representation_quality.py
+    compute_pairwise_AUC.py
+    downstream_pairwise_accuracy.py
   checkpoints/
 ```
 
