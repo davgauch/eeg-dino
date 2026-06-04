@@ -10,6 +10,7 @@ Project layout
   - `downstream_pairwise_accuracy.py`: computes pairwise downstream classification accuracy 
   - `analyze_representation_quality.py`: extracts embeddings from frozen SSL models and reports clustering / kNN metrics 
   - `compute_pairwise_AUC.py`: computes pairwise AUC per frequency band using log band power.
+  - `plot_sleepedf_psd.py`: plots PSD for Sleep-EDF recordings 
 - `configs.py`, `datasets.py`, `utils.py`, and `requirements.txt` stay at the root.
 - `checkpoints/` stores training outputs.
 - The raw dataset files stay on the server.
@@ -38,6 +39,7 @@ eeg-dino/
     analyze_representation_quality.py
     compute_pairwise_AUC.py
     downstream_pairwise_accuracy.py
+    plot_sleepedf_psd.py
   checkpoints/
 ```
 
