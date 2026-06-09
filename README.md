@@ -8,7 +8,11 @@ Project layout
 - `model/` contains the core implementation files: `channel_aware_sampling.py`, `dpe_module.py`, `eeg_dino_model.py`, `losses.py`, and `tfe_module.py`.
 - `experiments/` contains experimental analysis scripts
   - `downstream_pairwise_accuracy.py`: computes pairwise downstream classification accuracy 
+    and saves `test_predictions.npz` per run (used later by `analyze_confusion_matrices.py`)
+  - `analyze_confusion_matrices.py`: loads saved `.npz` predictions and computes/plots
+    confusion-matrix analyses across strategies
   - `analyze_representation_quality.py`: extracts embeddings from frozen SSL models and reports clustering / kNN metrics 
+  - `analyze_embedding_geometry.py`: analyzes embedding geometry across strategies/checkpoints
   - `compute_pairwise_AUC.py`: computes pairwise AUC per frequency band using log band power.
   - `plot_sleepedf_psd.py`: plots PSD for Sleep-EDF recordings 
 - `configs.py`, `datasets.py`, `utils.py`, and `requirements.txt` stay at the root.
@@ -36,6 +40,8 @@ eeg-dino/
     losses.py
     tfe_module.py
   experiments/
+    analyze_confusion_matrices.py
+    analyze_embedding_geometry.py
     analyze_representation_quality.py
     compute_pairwise_AUC.py
     downstream_pairwise_accuracy.py
@@ -87,6 +93,29 @@ python experiments/analyze_representation_quality.py \
   --checkpoint_dir checkpoints/significance_sleep_model \
   --preset tiny
 ```
+
+Compute downstream pairwise accuracy
+
+```bash
+python experiments/downstream_pairwise_accuracy.py \
+  --checkpoint_root checkpoints/myrun \
+  --strategies none random theta delta alpha beta \
+  --preset tiny
+```
+
+This saves aggregated results to `experiments/results/downstream_pairwise_aggregated.json`
+and also writes per-run prediction files at
+`experiments/results/<strategy>_seed<seed>/test_predictions.npz` for confusion analysis.
+
+Analyze confusion matrices
+
+```bash
+python experiments/analyze_confusion_matrices.py
+```
+
+This script loads `.npz` files produced by `downstream_pairwise_accuracy.py` and saves:
+- `experiments/results/n3_confusion_breakdown.png`
+- `experiments/results/confusion_matrices_summary.json`
 
 
 Notes

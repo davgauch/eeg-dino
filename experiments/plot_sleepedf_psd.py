@@ -1,157 +1,171 @@
-"""
-Plots the average Power Spectral Density (PSD) per sleep stage for Sleep-EDF.
-Saves one PNG per channel to experiments/results/.
-
+"""Compute pairwise AUC for each frequency band using log band power.
 Usage:
-    python experiments/plot_sleepedf_psd.py
+    python compute_pairwise_AUC.py
 """
-
 import os
 import sys
+import json
+from itertools import combinations
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
-from scipy.signal import welch
-from collections import defaultdict
-from torch.utils.data import DataLoader
+import matplotlib.colors as mcolors
 from tqdm import tqdm
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from torch.utils.data import DataLoader
+from sklearn.metrics import roc_auc_score
 from datasets import SleepEDFDataset, get_dataset_root
 
-SFREQ         = 200
-FREQ_MAX      = 40
-CHANNEL_NAMES = ['Fpz-Cz', 'Pz-Oz']
 
-STAGE_NAMES = {
-    0: 'Wake (W)',
-    1: 'N1',
-    2: 'N2',
-    3: 'N3 (Deep)',
-    4: 'REM',
-}
+def extract_band_power(x, sampling_rate=200, band='theta'):
+    band_ranges = {
+        'delta':      (1,  4),
+        'theta':      (4,  8),
+        'alpha':      (8,  13),
+        'beta':       (13, 30),
+        'beta_upper': (20, 30),
+        'theta_bw2':  (4,  6),
+        'theta_bw3':  (4,  7),
+        'theta_bw6':  (4,  10),
+        'beta_bw2':   (18, 20),
+        'beta_bw4':   (18, 22),
+    }
+    low_hz, high_hz = band_ranges[band]
+    spectrum   = torch.fft.rfft(x, dim=-1)
+    power      = torch.abs(spectrum) ** 2
+    freqs      = torch.fft.rfftfreq(x.shape[-1], d=1.0 / sampling_rate)
+    mask       = (freqs >= low_hz) & (freqs < high_hz)
+    band_power = power[:, :, mask]
+    mean_power = band_power.mean(dim=2)
+    log_power  = torch.log(mean_power + 1e-10)
+    return log_power.cpu().numpy()
 
-STAGE_COLORS = {
-    0: '#e74c3c',
-    1: '#e67e22',
-    2: '#2ecc71',
-    3: '#2980b9',
-    4: '#9b59b6',
-}
 
-BANDS = {
-    'delta\n(1–4 Hz)':  (1,  4,  '#3498db', 0.13),
-    'theta\n(4–8 Hz)':  (4,  8,  '#e74c3c', 0.13),
-    'alpha\n(8–13 Hz)': (8,  13, '#2ecc71', 0.10),
-    'beta\n(13–30 Hz)': (13, 30, '#f39c12', 0.08),
-}
+def plot_pairwise_auc(pairwise_auc, plot_bands, band_labels, stage_names,
+                      results_dir):
+    """Save one heatmap per band and one combined figure."""
+    pairs     = [f"{a}_vs_{b}" for a, b in combinations(stage_names, 2)]
+    n_pairs   = len(pairs)
+    n_bands   = len(plot_bands)
 
-print("Loading Sleep-EDF TrainFold...")
-sleep_root = get_dataset_root('sleep_edf')
-dataset    = SleepEDFDataset(sleep_root, 'TrainFold', n_channels=2, sampling_rate=SFREQ)
-loader     = DataLoader(dataset, batch_size=256, shuffle=False, num_workers=0)
+    # ── build matrix (pairs × bands) ─────────────────────────────
+    matrix = np.zeros((n_pairs, n_bands))
+    for i, pair in enumerate(pairs):
+        for j, band in enumerate(plot_bands):
+            matrix[i, j] = pairwise_auc[pair][band]
 
-psds_per_stage = defaultdict(list)
+    pair_labels = [p.replace('_vs_', ' vs ') for p in pairs]
 
-print("Computing PSDs...")
-for x, y in tqdm(loader, desc="Welch PSD"):
-    x_np = x.numpy()   # (B, C, T)
-    y_np = y.numpy()   # (B,)
-    for i in range(x_np.shape[0]):
-        label = int(y_np[i])
-        freqs, psd = welch(x_np[i], fs=SFREQ, nperseg=512, axis=-1)
-        psds_per_stage[label].append(psd)
+    # ── combined heatmap ──────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(max(8, n_bands * 1.1), max(5, n_pairs * 0.55)))
 
-avg_psd, std_psd = {}, {}
-for stage, psds in psds_per_stage.items():
-    arr = np.stack(psds, axis=0)
-    avg_psd[stage] = arr.mean(axis=0)   # (C, n_freqs)
-    std_psd[stage] = arr.std(axis=0)
+    cmap = plt.cm.RdYlGn
+    norm = mcolors.Normalize(vmin=0.5, vmax=1.0)
+    im   = ax.imshow(matrix, cmap=cmap, norm=norm, aspect='auto')
 
-freq_mask = freqs <= FREQ_MAX
-print(f"Frequency resolution: {freqs[1] - freqs[0]:.3f} Hz | "
-      f"Plotting up to {FREQ_MAX} Hz ({freq_mask.sum()} bins)")
+    ax.set_xticks(range(n_bands))
+    ax.set_xticklabels(band_labels, fontsize=9)
+    ax.set_yticks(range(n_pairs))
+    ax.set_yticklabels(pair_labels, fontsize=9)
 
-# Plotting average PSDs per stage
-results_dir = os.path.join(os.path.dirname(__file__), "results")
-os.makedirs(results_dir, exist_ok=True)
+    # annotate cells
+    for i in range(n_pairs):
+        for j in range(n_bands):
+            val   = matrix[i, j]
+            color = 'black' if 0.65 < val < 0.92 else 'white'
+            ax.text(j, i, f'{val:.2f}', ha='center', va='center',
+                    fontsize=7.5, color=color)
 
-for ch_idx, ch_name in enumerate(CHANNEL_NAMES):
-    fig, ax = plt.subplots(figsize=(8, 5))
+    cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+    cbar.set_label('AUC', fontsize=9)
+    cbar.ax.tick_params(labelsize=8)
 
-    ymin_approx, ymax_approx = -110, 10
-    for band_name, (low, high, color, alpha) in BANDS.items():
-        ax.axvspan(low, high, color=color, alpha=alpha, zorder=0)
+    ax.set_title('Pairwise AUC — Sleep Stage Separability by Frequency Band',
+                 fontsize=11, fontweight='bold', pad=12)
+    ax.set_xlabel('Frequency Band', fontsize=10)
+    ax.set_ylabel('Stage Pair',     fontsize=10)
 
-    for stage in sorted(avg_psd.keys()):
-        psd_ch  = avg_psd[stage][ch_idx]
-        std_ch  = std_psd[stage][ch_idx]
-        color   = STAGE_COLORS[stage]
-        label   = STAGE_NAMES.get(stage, str(stage))
-
-        psd_mean  = psd_ch[freq_mask]
-        psd_std   = std_ch[freq_mask]
-        upper_lin = psd_mean + 0.3 * psd_std
-        lower_lin = np.maximum(psd_mean - 0.3 * psd_std, 1e-12)
-        psd_db    = 10 * np.log10(psd_mean  + 1e-12)
-        upper     = 10 * np.log10(upper_lin + 1e-12)
-        lower     = 10 * np.log10(lower_lin)
-
-        ax.plot(freqs[freq_mask], psd_db, color=color,
-                linewidth=2.0, label=label, zorder=2)
-        ax.fill_between(freqs[freq_mask], lower, upper,
-                        color=color, alpha=0.15, zorder=1)
-
-    ax.set_xlim(0, FREQ_MAX)
-    ax.set_ylim(ymin_approx, ymax_approx)
-    ymin, ymax = ax.get_ylim()
-    label_y = ymax - (ymax - ymin) * 0.02
-
-    for band_name, (low, high, color, alpha) in BANDS.items():
-        ax.text((low + high) / 2, label_y, band_name,
-                ha='center', va='top', fontsize=7.5,
-                color=color, fontweight='bold', zorder=3)
-
-    ax.set_title(
-        f'Sleep-EDF — Average PSD by Sleep Stage\n'
-        f'Channel: {ch_name}  (Welch, {SFREQ} Hz)',
-        fontsize=11, fontweight='bold'
-    )
-    ax.set_xlabel('Frequency (Hz)', fontsize=10)
-    ax.set_ylabel('Power Spectral Density (dB)', fontsize=10)
-    ax.legend(loc='lower left', fontsize=9, framealpha=0.9)
-    ax.grid(True, alpha=0.3, linestyle='--', zorder=0)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
 
     plt.tight_layout()
-    out_name = f'psd_sleepedf_{ch_name.replace("-", "_")}.png'
-    out_path = os.path.join(results_dir, out_name)
+    out_path = os.path.join(results_dir, 'pairwise_auc_heatmap.png')
     plt.savefig(out_path, dpi=200, bbox_inches='tight')
     print(f"[Saved] {out_path}")
     plt.close()
 
-# Band power summary 
-band_ranges = {
-    'delta (1–4)':  (1,  4),
-    'theta (4–8)':  (4,  8),
-    'alpha (8–13)': (8,  13),
-    'beta (13–30)': (13, 30),
-}
-
-col_w = 16
-
-for ch_idx, ch_name in enumerate(CHANNEL_NAMES):
-    print(f'\n── Mean band power (dB) — channel: {ch_name} ────────')
-    header = f"{'Stage':<14}" + ''.join(f"{b:>{col_w}}" for b in band_ranges)
+    # ── print summary table ───────────────────────────────────────
+    col_w  = 13
+    header = f"{'Pair':<18}" + ''.join(f"{b:>{col_w}}" for b in band_labels)
+    print('\n── Pairwise AUC summary ────────────────────────────────────')
     print(header)
     print('─' * len(header))
-
-    for stage in sorted(avg_psd.keys()):
-        psd_ch = avg_psd[stage][ch_idx]   # (n_freqs,) — this channel only
-        row    = f"{STAGE_NAMES.get(stage, str(stage)):<14}"
-        for band, (lo, hi) in band_ranges.items():
-            mask     = (freqs >= lo) & (freqs < hi)
-            power_db = 10 * np.log10(psd_ch[mask].mean() + 1e-12)
-            row     += f"{power_db:>{col_w}.2f}"
+    for i, label in enumerate(pair_labels):
+        row = f"{label:<18}"
+        for j in range(n_bands):
+            row += f"{matrix[i, j]:>{col_w}.3f}"
         print(row)
+
+
+def main():
+    print("Loading Sleep-EDF test set...")
+    sleep_root = get_dataset_root('sleep_edf')
+    test_ds    = SleepEDFDataset(sleep_root, 'TestFold',
+                                 n_channels=2, sampling_rate=200)
+    test_loader = DataLoader(test_ds, batch_size=256,
+                             shuffle=False, num_workers=0)
+
+    bands       = ['delta', 'theta', 'alpha', 'beta', 'beta_upper',
+                   'theta_bw2', 'theta_bw3', 'theta_bw6',
+                   'beta_bw2', 'beta_bw4']
+    band_powers = {band: [] for band in bands}
+    all_labels  = []
+
+    print("Extracting band power...")
+    for x, y in tqdm(test_loader, desc="Processing"):
+        for band in bands:
+            power = extract_band_power(x, sampling_rate=200, band=band)
+            band_powers[band].append(power)
+        all_labels.append(y.numpy())
+
+    for band in bands:
+        band_powers[band] = np.concatenate(band_powers[band], axis=0)
+    all_labels = np.concatenate(all_labels, axis=0)
+
+    stage_names  = ['Wake', 'N1', 'N2', 'N3', 'REM']
+    pairs        = list(combinations(range(5), 2))
+    pairwise_auc = {}
+
+    for i, j in pairs:
+        mask      = (all_labels == i) | (all_labels == j)
+        y_bin     = (all_labels[mask] == i).astype(int)
+        pair_key  = f"{stage_names[i]}_vs_{stage_names[j]}"
+        pairwise_auc[pair_key] = {}
+        for band in bands:
+            X   = band_powers[band][mask]
+            score = X.mean(axis=1)
+            auc = roc_auc_score(y_bin, score)
+            auc = max(auc, 1 - auc)
+            pairwise_auc[pair_key][band] = float(auc)
+
+    results_dir = os.path.join(os.path.dirname(__file__), "results")
+    os.makedirs(results_dir, exist_ok=True)
+
+    output_path = os.path.join(results_dir, 'pairwise_auc_results.json')
+    with open(output_path, 'w') as f:
+        json.dump(pairwise_auc, f, indent=2)
+    print(f"\nPairwise AUC results saved to {output_path}")
+
+    # ── plot heatmap for the four canonical bands ─────────────────
+    plot_bands  = ['delta', 'theta', 'alpha', 'beta', 'beta_upper']
+    band_labels = ['Delta\n(1–4 Hz)', 'Theta\n(4–8 Hz)', 'Alpha\n(8–13 Hz)',
+                   'Beta\n(13–30 Hz)', 'Upper Beta\n(20–30 Hz)']
+    plot_pairwise_auc(pairwise_auc, plot_bands, band_labels,
+                      stage_names, results_dir)
+
+    print("Done.")
+
+
+if __name__ == '__main__':
+    main()
