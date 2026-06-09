@@ -1,55 +1,19 @@
 EEG-DINO
 
-This repository contains the code for pretraining and evaluating a Self Supervised learning model with EEG-DINO.
+Overview
 
-Project layout
+EEG-DINO provides code to pretrain and evaluate a self-supervised EEG representation model (EEG-DINO) and the analysis pipelines used in the project. The code implements state-of-the-art self-supervised EEG representation learning (DINO-style) and includes utilities for downstream evaluation and significance testing.
 
-- `train.py`, `evaluate.py`, `evaluate_bci.py`, and `run_significance_test_sleep.py` are the launch scripts.
-- `model/` contains the core implementation files: `channel_aware_sampling.py`, `dpe_module.py`, `eeg_dino_model.py`, `losses.py`, and `tfe_module.py`.
-- `experiments/` contains experimental analysis scripts
-  - `downstream_pairwise_accuracy.py`: computes pairwise downstream classification accuracy 
-    and saves `test_predictions.npz` per run (used later by `analyze_confusion_matrices.py`)
-  - `analyze_confusion_matrices.py`: loads saved `.npz` predictions and computes/plots
-    confusion-matrix analyses across strategies
-  - `analyze_representation_quality.py`: extracts embeddings from frozen SSL models and reports clustering / kNN metrics 
-  - `analyze_embedding_geometry.py`: analyzes embedding geometry across strategies/checkpoints
-  - `compute_pairwise_AUC.py`: computes pairwise AUC per frequency band using log band power.
-  - `plot_sleepedf_psd.py`: plots PSD for Sleep-EDF recordings 
-- `configs.py`, `datasets.py`, `utils.py`, and `requirements.txt` stay at the root.
-- `checkpoints/` stores training outputs.
-- The raw dataset files stay on the server.
+Quick structure
 
-Project tree
+- **Launch scripts**: `train.py`, `evaluate.py`, `evaluate_bci.py`, `run_significance_test_sleep.py`.
+- **Model code**: [model/](model/) contains the core implementation.
+- **Analysis**: [experiments/](experiments/) contains downstream and visualization utilities.
+- **Checkpoints**: `checkpoints/` stores saved runs and best models.
 
-```text
-eeg-dino/
-  README.md
-  requirements.txt
-  train.py
-  evaluate.py
-  evaluate_bci.py
-  run_significance_test_sleep.py
-  configs.py
-  datasets.py
-  utils.py
-  model/
-    __init__.py
-    channel_aware_sampling.py
-    dpe_module.py
-    eeg_dino_model.py
-    losses.py
-    tfe_module.py
-  experiments/
-    analyze_confusion_matrices.py
-    analyze_embedding_geometry.py
-    analyze_representation_quality.py
-    compute_pairwise_AUC.py
-    downstream_pairwise_accuracy.py
-    plot_sleepedf_psd.py
-  checkpoints/
-```
+Installation
 
-Setup
+Create a virtual environment and install dependencies:
 
 ```bash
 python -m venv .venv
@@ -57,9 +21,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Dataset paths
+Datasets
 
-Set a `.env` file at the project root to:
+Set dataset paths as environment variables (or in a `.env` file) before running scripts. Example (exact lab server paths used for experiments):
 
 ```bash
 SLEEP_EDF_PATH="/net/inltitan2.epfl.ch/scratch2/tzhu/EEGPT/datasets/downstream/sleep_edf/"
@@ -67,58 +31,33 @@ BCI_2A_PATH="/net/inltitan2.epfl.ch/scratch2/tzhu/EEGPT/datasets/downstream/Raw_
 BCI_2B_PATH="/net/inltitan2.epfl.ch/scratch2/tzhu/EEGPT/datasets/downstream/Raw_data/BCICIV_2b_gdf/"
 ```
 
-Run training (for theta masking for example)
+Reproducing results (minimal)
+
+1. Train a small test run (use `--preset tiny` for fast runs):
 
 ```bash
 python train.py --preset tiny --dataset sleep_edf --mask_strategy theta --n_epochs 30 --save_dir checkpoints/myrun
 ```
 
-This will save the run under `checkpoints/myrun/theta_seed42/` by default, so the best model ends up at `checkpoints/myrun/theta_seed42/best_model.pth`.
-
-Run the significance test
+2. Evaluate a saved model:
 
 ```bash
-python run_significance_test_sleep.py --strategies spatiotemporal theta --seeds 5 --n_epochs 30
+python evaluate.py --checkpoint checkpoints/myrun/theta_seed42/best_model.pth --preset tiny
 ```
 
-You can point `--checkpoint_root` to a different directory if your saved runs live elsewhere.
-If the checkpoints already exist, add `--skip_training` to evaluate them directly without retraining.
-
-Analyze representation quality
+3. Run a significance test pipeline (uses `checkpoints/` by default):
 
 ```bash
-python experiments/analyze_representation_quality.py \
-  --strategies none theta random \ 
-  --seeds 42 43 44 45 46 \
-  --checkpoint_dir checkpoints/significance_sleep_model \
-  --preset tiny
+python run_significance_test_sleep.py --strategies none theta random --seeds 42 43 44 --n_epochs 30
 ```
 
-Compute downstream pairwise accuracy
+Where to look next
 
-```bash
-python experiments/downstream_pairwise_accuracy.py \
-  --checkpoint_root checkpoints/myrun \
-  --strategies none random theta delta alpha beta \
-  --preset tiny
-```
-
-This saves aggregated results to `experiments/results/downstream_pairwise_aggregated.json`
-and also writes per-run prediction files at
-`experiments/results/<strategy>_seed<seed>/test_predictions.npz` for confusion analysis.
-
-Analyze confusion matrices
-
-```bash
-python experiments/analyze_confusion_matrices.py
-```
-
-This script loads `.npz` files produced by `downstream_pairwise_accuracy.py` and saves:
-- `experiments/results/n3_confusion_breakdown.png`
-- `experiments/results/confusion_matrices_summary.json`
-
+- Model implementation: [model/eeg_dino_model.py](model/eeg_dino_model.py)
+- Training loop & config flags: `train.py` and `configs.py`
+- Analysis scripts and outputs: [experiments/](experiments/) and `experiments/results/`
 
 Notes
 
-- Use `checkpoints/` for all saved runs and results.
-- For quick local tests, reduce `--n_epochs` and `--seeds`.
+- Use `checkpoints/` for saved runs. For quick local checks, reduce `--n_epochs` and number of `--seeds`.
+
