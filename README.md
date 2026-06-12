@@ -1,17 +1,19 @@
-EEG-DINO
+# EEG-DINO Adapted to SleepEDF
 
-Overview
+Self-supervised EEG representation learning for SleepEDF and related downstream evaluation.
+
+## Overview
 
 EEG-DINO provides code to pretrain and evaluate a self-supervised EEG representation model (EEG-DINO) and the analysis pipelines used in the project. The code implements state-of-the-art self-supervised EEG representation learning (DINO-style) and includes utilities for downstream evaluation and significance testing.
 
-Quick structure
+## Project Structure
 
 - **Launch scripts**: `train.py`, `evaluate.py`, `evaluate_bci.py`, `run_significance_test_sleep.py`.
 - **Model code**: [model/](model/) contains the core implementation.
 - **Analysis**: [experiments/](experiments/) contains downstream and visualization utilities.
 - **Checkpoints**: `checkpoints/` stores saved runs and best models.
 
-Installation
+## Installation
 
 Create a virtual environment and install dependencies:
 
@@ -21,7 +23,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Datasets
+## Datasets
 
 Set dataset paths as environment variables (or in a `.env` file) before running scripts. Example (exact lab server paths used for experiments):
 
@@ -31,7 +33,7 @@ BCI_2A_PATH="/net/inltitan2.epfl.ch/scratch2/tzhu/EEGPT/datasets/downstream/Raw_
 BCI_2B_PATH="/net/inltitan2.epfl.ch/scratch2/tzhu/EEGPT/datasets/downstream/Raw_data/BCICIV_2b_gdf/"
 ```
 
-Reproducing results (minimal)
+## Reproducing Results
 
 1. Train a small test run (use `--preset tiny` for fast runs):
 
@@ -51,13 +53,13 @@ python evaluate.py --checkpoint checkpoints/myrun/theta_seed42/best_model.pth --
 python run_significance_test_sleep.py --strategies none theta random --seeds 42 43 44 --n_epochs 30
 ```
 
-Where to look next
+## Where to Look Next
 
 - Model implementation: [model/eeg_dino_model.py](model/eeg_dino_model.py)
 - Training loop & config flags: `train.py` and `configs.py`
 - Analysis scripts and outputs: [experiments/](experiments/) and `experiments/results/`
 
-Notes
+## Notes
 
 - Use `checkpoints/` for saved runs. For quick local checks, reduce `--n_epochs` and number of `--seeds`.
 
