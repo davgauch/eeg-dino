@@ -1,12 +1,11 @@
 """Analyze intrinsic representation quality across masking strategies.
 
-Tests whether masking strategies create fundamentally better representations.
 
 Usage:
     python analyze_representation_quality.py \
         --strategies none random theta delta alpha beta \
         --seeds 42 43 44 45 46 \
-        --checkpoint_dir checkpoints/significance_sleep_model \
+        --checkpoint_dir checkpoints/myrun \
         --preset tiny
 """
 
@@ -307,8 +306,6 @@ def main():
                 logger.info(f"{strategy:<12} {mean_val:>14.1%} {std_val:>14.1%} {n:<5}")
             else:
                 logger.info(f"{strategy:<12} {mean_val:>14.4f} {std_val:>14.4f} {n:<5}")
-    
-    # Done: results printed above. No further interpretation is added here.
     
     # Save results
     output = {'strategies': results}

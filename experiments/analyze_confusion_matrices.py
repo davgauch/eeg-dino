@@ -31,7 +31,6 @@ STAGE_COLORS = {
 }
 
 
-# ── loading ───────────────────────────────────────────────────────
 def load_predictions(results_dir, strategies, seeds):
     data = defaultdict(dict)
     for strategy in strategies:
@@ -49,7 +48,6 @@ def load_predictions(results_dir, strategies, seeds):
     return data
 
 
-# ── confusion matrix ──────────────────────────────────────────────
 def compute_confusion_matrix(predictions, labels):
     """Row-normalised confusion matrix (rows = true class)."""
     cm = np.zeros((N_CLASSES, N_CLASSES))
@@ -71,7 +69,6 @@ def aggregate_confusion_matrices(data):
     return aggregated
 
 
-# ── printing ──────────────────────────────────────────────────────
 def print_n3_table(aggregated, baseline='none'):
     n3 = 3
     col_w = 14
@@ -124,7 +121,6 @@ def print_large_changes(aggregated, threshold=0.02, baseline='none'):
             print(f"    {STAGE_NAMES[i]}→{STAGE_NAMES[j]}: {d*100:+.2f}% {arrow}")
 
 
-# ── plotting ──────────────────────────────────────────────────────
 def plot_n3_breakdown(aggregated, results_dir):
     strategies = [s for s in STRATEGIES if s in aggregated]
     n3         = 3
@@ -161,7 +157,6 @@ def plot_n3_breakdown(aggregated, results_dir):
     plt.close()
 
 
-# ── save summary JSON ─────────────────────────────────────────────
 def save_summary(aggregated, results_dir):
     summary = {
         strategy: {

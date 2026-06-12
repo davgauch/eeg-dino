@@ -2,7 +2,7 @@
 
 Usage:
     python experiments/downstream_pairwise_accuracy.py \
-        --checkpoint_root checkpoints/significance_sleep_model2 \
+        --checkpoint_root checkpoints/myrun \
         --strategies none random theta delta alpha beta \
         --preset tiny
 """
@@ -33,7 +33,6 @@ from datasets import SleepEDFDataset, get_dataset_root
 STAGE_NAMES = {0: "Wake", 1: "N1", 2: "N2", 3: "N3", 4: "REM"}
 
 
-# ── model components ─────────────────────────────────────────────
 class FrozenBackbone(nn.Module):
     def __init__(self, n_channels, sampling_rate, embed_dim, n_layers, n_heads, mlp_dim):
         super().__init__()
@@ -70,7 +69,6 @@ class DownstreamClassifier(nn.Module):
         return self.probe(self.backbone(x, channel_indices))
 
 
-# ── helpers ───────────────────────────────────────────────────────
 def extract_features(backbone, loader, device):
     backbone.eval()
     feats, labels = [], []
@@ -219,7 +217,7 @@ def main():
         model     = DownstreamClassifier(backbone, probe)
         preds, labels = get_predictions(model, test_loader, device)
 
-        # ── save raw predictions for confusion analysis ───────────
+        # save raw predictions for confusion analysis
         pred_dir  = os.path.join(results_dir, f"{strat}_seed{seed}")
         os.makedirs(pred_dir, exist_ok=True)
         np.savez(os.path.join(pred_dir, "test_predictions.npz"),
@@ -230,7 +228,7 @@ def main():
         results.setdefault(strat, {'per_seed': {}})
         results[strat]['per_seed'][str(seed)] = {'pairwise_accuracy': pairwise_acc}
 
-    # ── aggregate across seeds ────────────────────────────────────
+    # aggregate across seeds 
     aggregated = {}
     for strat, info in results.items():
         per       = info['per_seed']

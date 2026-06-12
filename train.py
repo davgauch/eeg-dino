@@ -130,14 +130,12 @@ class EEGDINOTrainer:
         has_masked_views = (self.sampler.n_masked_views > 0)  # ← ADD THIS
 
         for x in loader:
-            # 1.Update schedules
+
             self._update_schedules()
             self.step += 1
 
-            # 2.Forward pass
             s_out, t_out, s_pat, t_pat = self._forward(x)
 
-            # 3. Compute losses
             l_sig, _ = self.signal_loss_fn(s_out, t_out, self.teacher.center)
             if has_masked_views:
                 l_pat = self.patch_loss_fn(s_pat, t_pat, self.teacher.patch_center)
@@ -146,16 +144,13 @@ class EEGDINOTrainer:
                 l_pat = torch.tensor(0.0, device=self.device)
                 loss = l_sig
 
-            # 4. Backward pass
             self.optimizer.zero_grad()
             loss.backward()
             gn = torch.nn.utils.clip_grad_norm_(self.student.parameters(), 3.0)
             self.optimizer.step()
 
-            # 5. EMA update for teacher
             self._ema_update()
 
-            # 6. update teacher centers
             with torch.no_grad():
                 tg = torch.cat([t_out['global_0'], t_out['global_1']])
                 self.teacher.update_center(tg)
@@ -164,7 +159,6 @@ class EEGDINOTrainer:
                     tp = torch.cat([t_pat['global_0'], t_pat['global_1']])
                     self.teacher.update_patch_center(tp)
 
-                # 7. diagnostics
                 s_cat = torch.cat([v for v in s_out.values()])
                 diag['s_std'] += s_cat.std(dim=0).mean().item()
                 diag['t_std'] += tg.std(dim=0).mean().item()
@@ -216,7 +210,6 @@ class EEGDINOTrainer:
         }
 
     def train(self, train_loader, val_loader=None, save_dir='checkpoints'):
-        # 1. Setup
         os.makedirs(save_dir, exist_ok=True)
         self.total_steps = len(train_loader) * self.n_epochs
         self.step = 0
@@ -228,7 +221,6 @@ class EEGDINOTrainer:
         collapse_threshold = math.log(self.signal_loss_fn.out_dim)
         best = float('inf')
 
-        # 2. Training loop
         for epoch in range(1, self.n_epochs + 1):
             tr = self._train_epoch(train_loader, epoch)
             d = tr['diag']
@@ -292,7 +284,6 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    # configure logging for CLI runs
     logging.basicConfig(level=logging.INFO,
                         stream=sys.stdout,
                         format='[%(asctime)s] %(levelname)s:%(name)s: %(message)s',

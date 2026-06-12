@@ -2,7 +2,7 @@
 
 Usage:
     python experiments/analyze_embedding_geometry.py \
-        --checkpoint_root checkpoints/significance_sleep_model2 \
+        --checkpoint_root checkpoints/myrun \
         --strategies none theta beta delta alpha \
         --preset tiny
 """
@@ -42,7 +42,6 @@ STAGE_COLORS = {
 }
 
 
-# ── model ─────────────────────────────────────────────────────────
 class FrozenBackbone(torch.nn.Module):
     def __init__(self, n_channels, sampling_rate, embed_dim,
                  n_layers, n_heads, mlp_dim):
@@ -63,7 +62,6 @@ class FrozenBackbone(torch.nn.Module):
         return cls
 
 
-# ── embedding extraction ──────────────────────────────────────────
 def load_backbone(checkpoint_path, cfg, device):
     backbone = FrozenBackbone(
         n_channels=cfg['n_channels'], sampling_rate=cfg['sampling_rate'],
@@ -87,7 +85,7 @@ def extract_embeddings(backbone, loader, device):
     return np.vstack(embeddings), np.concatenate(labels)
 
 
-# ── geometry metrics ──────────────────────────────────────────────
+
 def compute_centroids(embeddings, labels):
     return {s: embeddings[labels == s].mean(axis=0) for s in range(N_CLASSES)}
 
@@ -110,7 +108,6 @@ def compute_within_class_scatter(embeddings, labels, centroids):
     return scatter
 
 
-# ── printing ──────────────────────────────────────────────────────
 def print_centroid_table(distances, strategies, baseline='none'):
     key_pairs = [(2, 3, 'N2--N3'), (0, 3, 'Wake--N3'),
                  (0, 4, 'Wake--REM'), (2, 4, 'N2--REM'), (1, 4, 'N1--REM')]
@@ -153,7 +150,7 @@ def print_scatter_table(scatter, strategies):
         print(row)
 
 
-# ── plotting ──────────────────────────────────────────────────────
+
 def plot_centroid_distances(distances, strategies, results_dir):
     """Grouped bar chart of key centroid distances across strategies."""
     key_pairs  = [(2, 3, 'N2--N3'), (0, 3, 'Wake--N3'),
@@ -227,7 +224,7 @@ def plot_scatter_comparison(scatter, strategies, results_dir):
     plt.close()
 
 
-# ── checkpoint iteration ──────────────────────────────────────────
+
 def iter_checkpoints(checkpoint_root, strategies, seeds):
     root     = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', checkpoint_root)) \
                if not os.path.isabs(checkpoint_root) else checkpoint_root
@@ -263,7 +260,7 @@ def main():
         SleepEDFDataset(sleep_root, 'TestFold', cfg['n_channels'], cfg['sampling_rate']),
         batch_size=256, shuffle=False, num_workers=1)
 
-    # ── collect per-seed metrics ──────────────────────────────────
+
     per_seed = defaultdict(lambda: {'distances': [], 'scatter': []})
 
     for strat, seed, ckpt in iter_checkpoints(args.checkpoint_root,
@@ -276,7 +273,7 @@ def main():
         per_seed[strat]['scatter'].append(
             compute_within_class_scatter(embeddings, labels, centroids))
 
-    # ── aggregate across seeds ────────────────────────────────────
+    # aggregate across seeds 
     strategies = [s for s in args.strategies if s in per_seed]
     distances  = {}
     scatter    = {}
@@ -292,13 +289,11 @@ def main():
             for s in range(N_CLASSES)
         }
 
-    # ── print and plot ────────────────────────────────────────────
     print_centroid_table(distances, strategies)
     print_scatter_table(scatter, strategies)
     plot_centroid_distances(distances, strategies, results_dir)
     plot_scatter_comparison(scatter, strategies, results_dir)
 
-    # ── save JSON ─────────────────────────────────────────────────
     out = {
         'centroid_distances': {s: distances[s].tolist() for s in strategies},
         'within_class_scatter': {

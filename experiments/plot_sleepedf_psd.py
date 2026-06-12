@@ -49,7 +49,6 @@ def plot_pairwise_auc(pairwise_auc, plot_bands, band_labels, stage_names,
     n_pairs   = len(pairs)
     n_bands   = len(plot_bands)
 
-    # ── build matrix (pairs × bands) ─────────────────────────────
     matrix = np.zeros((n_pairs, n_bands))
     for i, pair in enumerate(pairs):
         for j, band in enumerate(plot_bands):
@@ -57,7 +56,7 @@ def plot_pairwise_auc(pairwise_auc, plot_bands, band_labels, stage_names,
 
     pair_labels = [p.replace('_vs_', ' vs ') for p in pairs]
 
-    # ── combined heatmap ──────────────────────────────────────────
+    # combined heatmap
     fig, ax = plt.subplots(figsize=(max(8, n_bands * 1.1), max(5, n_pairs * 0.55)))
 
     cmap = plt.cm.RdYlGn
@@ -95,7 +94,6 @@ def plot_pairwise_auc(pairwise_auc, plot_bands, band_labels, stage_names,
     print(f"[Saved] {out_path}")
     plt.close()
 
-    # ── print summary table ───────────────────────────────────────
     col_w  = 13
     header = f"{'Pair':<18}" + ''.join(f"{b:>{col_w}}" for b in band_labels)
     print('\n── Pairwise AUC summary ────────────────────────────────────')
@@ -157,7 +155,7 @@ def main():
         json.dump(pairwise_auc, f, indent=2)
     print(f"\nPairwise AUC results saved to {output_path}")
 
-    # ── plot heatmap for the four canonical bands ─────────────────
+    # plot heatmap for selected bands
     plot_bands  = ['delta', 'theta', 'alpha', 'beta', 'beta_upper']
     band_labels = ['Delta\n(1–4 Hz)', 'Theta\n(4–8 Hz)', 'Alpha\n(8–13 Hz)',
                    'Beta\n(13–30 Hz)', 'Upper Beta\n(20–30 Hz)']
