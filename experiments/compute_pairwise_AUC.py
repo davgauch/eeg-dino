@@ -9,7 +9,6 @@ import sys
 import json
 from itertools import combinations
 
-# ensure project root is on sys.path so experiments can import top-level modules
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
